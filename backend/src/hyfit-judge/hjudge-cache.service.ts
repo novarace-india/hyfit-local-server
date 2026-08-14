@@ -26,6 +26,10 @@ export class HjudgeCacheService {
     return this.cache.set<T>(key, value, ttlSeconds);
   }
 
+  delete(key: string): Promise<void> {
+    return this.cache.delete(key);
+  }
+
   eventsListKey(): string {
     return this.key('events', 'list');
   }

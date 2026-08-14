@@ -43,7 +43,13 @@ const adminService = {
 
 // scopeTo is private by design — nothing outside the controller should be able
 // to widen a session's event — so the test reaches it the same way the routes do.
-const controller = new HjudgeAdminController(adminService as any, null as any);
+const controller = new HjudgeAdminController(
+  adminService as any,
+  null as any,
+  null as any,
+  null as any,
+  null as any,
+);
 const scopeTo = (u: HjudgeUser, eventId?: string): Promise<HjudgeUser> =>
   (controller as any).scopeTo(u, eventId);
 
@@ -118,6 +124,9 @@ describe('HYFIT admin event scoping', () => {
           return Promise.resolve({ users: [] });
         },
       } as any,
+      null as any,
+      null as any,
+      null as any,
       null as any,
     );
 

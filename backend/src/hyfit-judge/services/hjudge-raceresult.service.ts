@@ -35,8 +35,13 @@ export interface RaceResultConfig {
    *  code belongs to. Blank stops check-in entirely rather than being guessed
    *  at — without it there is no way to know a band is already spoken for. */
   mapLookupUrl: string;
+  /** The standings Custom API. Its own key — nothing about it is derived from
+   *  the participant one. Blank when the event publishes no results feed, which
+   *  is a normal state: check-in and judging do not need it. */
+  resultsUrl: string;
   participantMapping: Record<string, unknown>;
   updateMapping: Record<string, unknown>;
+  resultsMapping: Record<string, unknown>;
   declarationText: string;
   declarationVersion: number;
   checkinWindowEnabled: boolean;
@@ -81,8 +86,10 @@ export class HjudgeRaceResultService {
       `SELECT c.bib_lookup_url AS "participantApiUrl",
               c.update_url AS "updateApiUrl",
               c.map_lookup_url AS "mapLookupUrl",
+              c.results_url AS "resultsUrl",
               c.participant_mapping AS "participantMapping",
               c.update_mapping AS "updateMapping",
+              c.results_mapping AS "resultsMapping",
               c.declaration_text AS "declarationText",
               c.declaration_version AS "declarationVersion",
               c.checkin_window_enabled AS "checkinWindowEnabled",
@@ -107,8 +114,10 @@ export class HjudgeRaceResultService {
       participantApiUrl: String(row.participantApiUrl ?? '').trim(),
       updateApiUrl: String(row.updateApiUrl ?? '').trim(),
       mapLookupUrl: String(row.mapLookupUrl ?? '').trim(),
+      resultsUrl: String(row.resultsUrl ?? '').trim(),
       participantMapping: row.participantMapping ?? {},
       updateMapping: row.updateMapping ?? {},
+      resultsMapping: row.resultsMapping ?? {},
       declarationText: row.declarationText || DEFAULT_DECLARATION,
       declarationVersion: row.declarationVersion ?? 1,
       checkinWindowEnabled: Boolean(row.checkinWindowEnabled),

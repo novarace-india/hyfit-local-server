@@ -365,6 +365,17 @@ export default function AdminEvents() {
                                     >
                                         Team
                                     </Link>
+                                    {/* Offline events only in practice, but the
+                                        link is always here: it is also where an
+                                        event is MADE offline, and a control that
+                                        only appears once it has been used is a
+                                        control nobody can find the first time. */}
+                                    <Link
+                                        href={appPath(`/hyfitgames/admin/events/${row.id}/sync`)}
+                                        className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk"
+                                    >
+                                        Sync
+                                    </Link>
                                 </div>
                             </div>
                         </div>

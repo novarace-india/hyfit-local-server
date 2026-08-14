@@ -53,6 +53,16 @@ psql -d hyfit_local -v ON_ERROR_STOP=1 -f backend/sql/hyfit_schema.sql
 # The field-operations schema — flattened end state of 080 + 082.
 psql -d hyfit_local -v ON_ERROR_STOP=1 -f backend/sql/hyfit_v2_schema.sql
 
+# 083–086 are NOT in that flattened file and have to be applied in order on top
+# of it. They are what the Results, Athletes and Sync screens run on:
+#   083 the athletes + results tables and the event's results mode
+#   084 the athlete identity keys (mobile_key / name_key / contest_key)
+#   085 the flat athletes table — one row per athlete per category per event
+#   086 offline events: delivery mode, connection codes, push targets
+for f in 083 084 085 086; do
+  psql -d hyfit_local -v ON_ERROR_STOP=1 -f backend/sql/"$f"_*.sql
+done
+
 # A super_admin to sign in as. Dev credentials only.
 psql -d hyfit_local -v ON_ERROR_STOP=1 -f backend/sql/seed_hyfit_admin.sql
 psql -d hyfit_local -v ON_ERROR_STOP=1 -f backend/sql/seed_hyfit_v2_admin.sql
@@ -173,6 +183,62 @@ Nothing about a stage is stored in Postgres any more. `hyfit_v2.users.checkin_st
 is left in place and left NULL — no migration to run — and nothing reads or
 writes it; the Team screen no longer offers it, and a `checkinStage` column in a
 CSV staff import is read past rather than rejected.
+
+## Offline events: running here, publishing from prod
+
+An event is **online** — the deployment the crew works in is the deployment the
+public reads, which is everything that came before — or it is **offline**: the
+crew works on this server, on the venue's own network, and prod publishes.
+`events.delivery_mode` says which, per event, and it defaults to `online`, so
+nothing existing changes until somebody switches an event over.
+
+### What crosses, and what does not
+
+Two tables: `hyfit_v2.athletes` and `hyfit_v2.results`. They are what a public
+results page is built from, and they are the whole of what an offline event owes
+prod. Judges, counters, sessions, PINs and `raceresults_endpoints` do not cross —
+those URLs are themselves credentials and a second copy of them buys no reader
+anything. The push is strictly one-way: prod never writes back into those two
+tables for an offline event.
+
+### Which server is which
+
+`HYFIT_NODE_ROLE` in the environment — `local` here, `prod` there. It is not a
+database row and not an admin toggle, because an operator who could flip prod to
+`local` on a screen would have an afternoon in which prod tried to push its own
+results somewhere. The Sync screen states the role read-only and renders the
+half that applies.
+
+### The run of it
+
+1. **Create the event by hand on both servers.** They are two rows in two
+   databases and their ids differ; nothing requires them to match.
+2. **Set it to offline on both**, on each server's Sync screen. Prod's copy is
+   what lets a push in; this one is what turns the push panel on.
+3. **On prod, create a connection code.** One code, one event, two routes. The
+   secret is shown once and only its hash is kept.
+4. **Paste it here**, on this event's Sync screen. It handshakes before storing
+   anything, so a code minted for a different race fails on a read rather than
+   after overwriting standings that are already public.
+5. **Import the roster as usual** (Athletes → Import from RaceResult), then press
+   **Sync athletes to prod**. Results cannot land for athletes prod has never
+   heard of, so this comes first — a results push does it automatically if it
+   has never run.
+6. **Pick an interval** — manual only, or every 1/2/3/5/10/20/30/60 minutes. The
+   timer runs in this server, not in the browser, so closing the console does
+   not stop it. A scheduled push whose standings prod already has is skipped.
+7. **Publish on prod**, on its Results screen, by setting the event's mode to
+   `stored`. A push fills the tables; it never decides what a reader is served.
+
+### If the link drops
+
+It will. Every push is a whole snapshot rather than a diff, so there is no
+accumulated state to be wrong about — one successful push after any outage puts
+prod exactly where it should be. Failures back off, the last error is on the
+Sync screen, and `hyfit_v2.push_runs` keeps the recent attempts.
+
+Revoking the code on prod, or moving the event back to `online` there, stops
+everything immediately.
 
 ## Venue tools
 

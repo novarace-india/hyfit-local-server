@@ -35,12 +35,17 @@ const NAV = [
 // it is what the old implicit behaviour got wrong whenever no event was active.
 //
 // Ordered the way an event is actually run: staff it, wire it to RaceResult,
-// pull the start list, then publish what they did.
+// pull the start list, publish what they did — and, for an event run at a venue
+// on a local server, send that up to the deployment the public reads.
 const FIELD_NAV = [
     { segment: "team", label: "Team", icon: "♟" },
     { segment: "operations", label: "Operations", icon: "⚙" },
     { segment: "athletes", label: "Athletes", icon: "♞" },
     { segment: "results", label: "Results", icon: "▣" },
+    // Last because it is last chronologically, and present on every event
+    // rather than only offline ones: this screen is also where an event is MADE
+    // offline, so hiding it until it had been used would hide the switch.
+    { segment: "sync", label: "Sync", icon: "⇅" },
 ];
 
 function eventIdFromPath(pathname: string): string | null {
