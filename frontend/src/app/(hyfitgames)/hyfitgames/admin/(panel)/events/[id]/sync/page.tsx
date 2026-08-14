@@ -161,11 +161,26 @@ export default function SyncPage() {
     const [state, setState] = useState<State | null>(null);
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState("");
+    const [refreshing, setRefreshing] = useState(false);
     const [msg, setMsg] = useState("");
     const [err, setErr] = useState("");
 
+    /* Refetch WITHOUT blanking the screen.
+     *
+     * `loading` starts true and is cleared by the first load; it is never set
+     * back. That is deliberate and was a bug the first time round: every action
+     * here ends in a refetch, and a refetch that re-raised `loading` swapped the
+     * whole page for a spinner — which unmounts the panels below and takes their
+     * local state with it. The visible symptom was the worst one available: you
+     * pressed Create connection code, the credential really was minted, and the
+     * endpoints you were told to copy "now, because they are not shown again"
+     * vanished in the same tick. The auto-refresh had the same effect every
+     * twenty seconds.
+     *
+     * `refreshing` carries the same information without costing anyone the
+     * screen. */
     const load = useCallback(async () => {
-        setLoading(true);
+        setRefreshing(true);
         setErr("");
         try {
             setState(await judgeApi<State>(scoped("/admin/sync")));
@@ -173,6 +188,7 @@ export default function SyncPage() {
             setErr(e.message);
         } finally {
             setLoading(false);
+            setRefreshing(false);
         }
     }, [eventId]);
 
@@ -225,6 +241,7 @@ export default function SyncPage() {
                 : "This event publishes from wherever it runs";
         });
 
+    // First paint only — see `load`.
     if (!ready || (loading && user)) return <Spinner />;
 
     if (!user) {
@@ -253,6 +270,9 @@ export default function SyncPage() {
             </p>
             <EventPicker eventId={eventId} segment="sync" />
 
+            {refreshing && (
+                <p className="mt-2 text-xs font-bold uppercase tracking-widest text-fog">Refreshing…</p>
+            )}
             {msg && <div className="mt-3 rounded-lg bg-good-soft px-3 py-2 text-sm text-good">{msg}</div>}
             <ErrorNote msg={err} />
 
