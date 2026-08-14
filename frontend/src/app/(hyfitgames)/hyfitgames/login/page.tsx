@@ -10,7 +10,12 @@ import HfgThemeToggle from "../lib/theme-toggle";
 // Athlete mobile + OTP login. Ported from pages/Login.jsx.
 export default function Login() {
     const router = useRouter();
-    const [step, setStep] = useState<"mobile" | "otp">("mobile");
+    // "who" is reached only when one number holds several athletes, which the
+    // phone + name identity makes possible on purpose: a parent enters two
+    // children on their own number and those are two people. The OTP proves the
+    // NUMBER; this step says which of them is signing in.
+    const [step, setStep] = useState<"mobile" | "otp" | "who">("mobile");
+    const [profiles, setProfiles] = useState<{ id: string; full_name: string }[]>([]);
     const [countryCode, setCountryCode] = useState("+91");
     const [mobile, setMobile] = useState("");
     const [code, setCode] = useState("");
@@ -53,6 +58,32 @@ export default function Login() {
             const data = await api("/auth/otp/verify", {
                 method: "POST",
                 body: { mobile: getFullMobile(), code: value },
+            });
+            // Signed in already, as the first athlete on the number. The code is
+            // spent, so the chooser below cannot re-verify — it switches with
+            // the session just issued, which is only ever allowed to move
+            // between profiles on the same proved number.
+            session.save(data);
+            if ((data.profiles?.length ?? 1) > 1) {
+                setProfiles(data.profiles);
+                setStep("who");
+                setBusy(false);
+                return;
+            }
+            router.replace(appPath("/hyfitgames"));
+        } catch (e: any) {
+            setErr(e.message);
+            setBusy(false);
+        }
+    };
+
+    const chooseProfile = async (athleteId: string) => {
+        setErr("");
+        setBusy(true);
+        try {
+            const data = await api("/auth/profile/switch", {
+                method: "POST",
+                body: { athleteId },
             });
             session.save(data);
             router.replace(appPath("/hyfitgames"));
@@ -178,6 +209,29 @@ export default function Login() {
                     >
                         {cooldown > 0 ? `Resend OTP in ${cooldown}s` : "Resend OTP"}
                     </button>
+                </div>
+            )}
+
+            {/* Several people race on one number — a parent and their children,
+                most often. The number is already proved at this point; this only
+                says which of them is here. */}
+            {step === "who" && (
+                <div className="mt-10 space-y-3">
+                    <p className="text-sm text-fog">
+                        This number has {profiles.length} athletes. Who is signing in?
+                    </p>
+                    {profiles.map((p) => (
+                        <button
+                            key={p.id}
+                            disabled={busy}
+                            onClick={() => chooseProfile(p.id)}
+                            className="flex w-full items-center justify-between rounded-xl border border-smoke bg-coal px-4 py-3.5 text-left disabled:opacity-40"
+                        >
+                            <span className="font-semibold">{p.full_name}</span>
+                            <span className="text-hyred-ink">→</span>
+                        </button>
+                    ))}
+                    <ErrorNote msg={err} />
                 </div>
             )}
         </main>

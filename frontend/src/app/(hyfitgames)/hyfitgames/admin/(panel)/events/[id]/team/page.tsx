@@ -15,19 +15,21 @@ const ROLES = [
     { value: "checkin", label: "Check-in Volunteer" },
 ] as const;
 
-// A check-in volunteer is no longer hired onto a stage. One counter runs
-// whichever hand-over the athlete in front of it is due — worked out from the
-// equipment they already hold — so there is nothing about a stage to record
-// against a person, and nothing here to choose.
+const STAGES = [
+    { value: "STAGE_1_WRISTBAND", label: "Stage 1 · Check-In & Wristband", short: "Stage 1" },
+    { value: "STAGE_2_TRANSPONDER", label: "Stage 2 · Arena Transponder", short: "Stage 2" },
+] as const;
+
 type CsvStaffRecord = {
     staffId: string;
     name?: string;
     pin: string;
     role: string;
     stationNumber?: number;
+    checkinStage?: string;
 };
 
-const blankUser = { staffId: "", name: "", pin: "", role: "judge", stationNumber: "" };
+const blankUser = { staffId: "", name: "", pin: "", role: "judge", stationNumber: "", checkinStage: "STAGE_1_WRISTBAND" };
 
 export default function TeamPage() {
     const { id: eventId } = useParams<{ id: string }>();
@@ -57,6 +59,7 @@ export default function TeamPage() {
         name: string;
         role: string;
         stationNumber: string;
+        checkinStage: string;
         pin: string;
         enabled: boolean;
     } | null>(null);
@@ -107,7 +110,7 @@ export default function TeamPage() {
 
     // CSV Sample Download
     const downloadSampleCsv = () => {
-        const csvContent = `staffId,name,pin,role,stationNumber\nSTF-101,John Doe,1234,judge,1\nSTF-102,,5678,checkin,\nSTF-103,Asha Rao,4321,checkin,`;
+        const csvContent = `staffId,name,pin,role,stationNumber,checkinStage\nSTF-101,John Doe,1234,judge,1,\nSTF-102,,5678,checkin,,STAGE_1_WRISTBAND\nSTF-103,Asha Rao,4321,checkin,,STAGE_2_TRANSPONDER`;
         const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -142,6 +145,8 @@ export default function TeamPage() {
                 const pinIdx = headers.findIndex((h) => h === "pin" || h === "passcode");
                 const roleIdx = headers.findIndex((h) => h === "role" || h === "type");
                 const stationIdx = headers.findIndex((h) => h === "stationnumber" || h === "station" || h === "segment");
+                const stageIdx = headers.findIndex((h) => h === "checkinstage" || h === "stage" || h === "stagetype");
+
                 if (staffIdIdx === -1 || pinIdx === -1) {
                     throw new Error("CSV header must include at least 'staffId' and 'pin' columns.");
                 }
@@ -157,11 +162,17 @@ export default function TeamPage() {
                     const role = roleIdx !== -1 && cols[roleIdx] ? cols[roleIdx] : "judge";
                     const stationRaw = stationIdx !== -1 ? cols[stationIdx] : "";
                     const stationNumber = stationRaw && !isNaN(Number(stationRaw)) ? Number(stationRaw) : undefined;
-                    // A `checkinStage` column left over from an older sheet is
-                    // read past rather than rejected: it names something that no
-                    // longer exists, and failing an import over it would be
-                    // pedantry at the top of an event day.
-                    records.push({ staffId, name, pin, role, stationNumber });
+                    // A short form is accepted because nobody types
+                    // STAGE_2_TRANSPONDER into a spreadsheet by choice.
+                    const stageRaw = (stageIdx !== -1 ? cols[stageIdx] : "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+                    const checkinStage =
+                        stageRaw.includes("2") || stageRaw.includes("TRANSPONDER")
+                            ? "STAGE_2_TRANSPONDER"
+                            : stageRaw
+                              ? "STAGE_1_WRISTBAND"
+                              : undefined;
+
+                    records.push({ staffId, name, pin, role, stationNumber, checkinStage });
                 }
 
                 if (records.length === 0) throw new Error("No valid staff records found in CSV file.");
@@ -208,6 +219,9 @@ export default function TeamPage() {
                     pin: newUser.pin,
                     role: newUser.role,
                     stationNumber: Number(newUser.stationNumber) || null,
+                    // A judge staffs no counter, so the stage travels only with
+                    // the role that uses it.
+                    checkinStage: newUser.role === "checkin" ? newUser.checkinStage : null,
                     eventId,
                 }),
             });
@@ -232,6 +246,7 @@ export default function TeamPage() {
                     name: editingUser.name.trim() || editingUser.staffId,
                     role: editingUser.role,
                     stationNumber: editingUser.stationNumber.trim() !== "" ? Number(editingUser.stationNumber) : null,
+                    checkinStage: editingUser.role === "checkin" ? editingUser.checkinStage : null,
                     pin: editingUser.pin.trim() ? editingUser.pin.trim() : undefined,
                     enabled: editingUser.enabled,
                     eventId,
@@ -280,11 +295,15 @@ export default function TeamPage() {
         }
     };
 
+    const stageShort = (stage?: string | null) => STAGES.find((s) => s.value === stage)?.short ?? null;
+
     const counts = useMemo(() => {
         const enabled = users.filter((u) => u.enabled);
         return {
             judges: enabled.filter((u) => u.role === "judge").length,
-            counters: enabled.filter((u) => u.role === "checkin").length,
+            stage1: enabled.filter((u) => u.role === "checkin" && u.checkinStage === "STAGE_1_WRISTBAND").length,
+            stage2: enabled.filter((u) => u.role === "checkin" && u.checkinStage === "STAGE_2_TRANSPONDER").length,
+            unstaged: enabled.filter((u) => u.role === "checkin" && !u.checkinStage).length,
         };
     }, [users]);
 
@@ -303,7 +322,11 @@ export default function TeamPage() {
                 stationStr.includes(q) ||
                 roleStr.includes(q);
 
-            const matchesRole = userRoleFilter === "all" || u.role === userRoleFilter;
+            const matchesRole =
+                userRoleFilter === "all" ||
+                (userRoleFilter === "STAGE_1_WRISTBAND" || userRoleFilter === "STAGE_2_TRANSPONDER"
+                    ? u.role === "checkin" && u.checkinStage === userRoleFilter
+                    : u.role === userRoleFilter);
             const matchesStatus =
                 userStatusFilter === "all" ||
                 (userStatusFilter === "enabled" && u.enabled) ||
@@ -367,9 +390,11 @@ export default function TeamPage() {
                 <ErrorNote msg={err} />
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-4">
                 {stat("Judges", counts.judges, "text-purple-300")}
-                {stat("Check-in volunteers", counts.counters, "text-blue-300")}
+                {stat("Stage 1 · Wristband", counts.stage1, "text-blue-300")}
+                {stat("Stage 2 · Transponder", counts.stage2, "text-blue-300")}
+                {stat("No stage set", counts.unstaged, counts.unstaged ? "text-warn" : "text-fog")}
             </div>
 
             {/* Onboard staff card with Manual & CSV Tabs */}
@@ -437,12 +462,20 @@ export default function TeamPage() {
                         </div>
                         <div className="space-y-3">
                             {newUser.role === "checkin" ? (
-                                <div className="rounded-lg border border-smoke bg-ink px-3 py-2.5">
-                                    <p className="text-xs font-semibold text-fog">No stage to assign</p>
+                                <div>
+                                    <label className="text-xs font-semibold text-fog">Check-in stage *</label>
+                                    <select
+                                        value={newUser.checkinStage}
+                                        onChange={(e) => setNewUser({ ...newUser, checkinStage: e.target.value })}
+                                        className="w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
+                                    >
+                                        {STAGES.map((s) => (
+                                            <option key={s.value} value={s.value}>{s.label}</option>
+                                        ))}
+                                    </select>
                                     <p className="mt-1 text-[11px] text-fog">
-                                        A counter runs whichever hand-over the athlete in front of it is due —
-                                        a wristband if they hold none, a transponder if they do. The equipment
-                                        mapping table decides, so there is nothing to set here.
+                                        The stage they open when they sign in to the check-in app. There are no
+                                        named counters to assign — this is the whole assignment.
                                     </p>
                                 </div>
                             ) : (
@@ -493,7 +526,7 @@ export default function TeamPage() {
                                 <p className="text-xs font-bold text-chalk">
                                     {csvFile ? `Selected File: ${csvFile.name}` : "Click to select CSV file"}
                                 </p>
-                                <p className="text-[11px] text-fog mt-1">Columns: staffId, name (optional), pin, role (judge · checkin), stationNumber (optional)</p>
+                                <p className="text-[11px] text-fog mt-1">Columns: staffId, name (optional), pin, role (judge · checkin), stationNumber (optional), checkinStage (optional)</p>
                             </div>
                         </div>
 
@@ -508,6 +541,7 @@ export default function TeamPage() {
                                             <span className="text-chalk font-bold">{r.staffId}</span>
                                             <span className="text-fog">{r.name || "(No Name)"}</span>
                                             <span className="text-hyred">{r.role}</span>
+                                            <span className="text-fog">{r.role === "checkin" ? (stageShort(r.checkinStage) ?? "Stage 1") : "—"}</span>
                                             <span className="text-fog">PIN: {r.pin}</span>
                                         </div>
                                     ))}
@@ -582,6 +616,8 @@ export default function TeamPage() {
                             <option value="all">All Roles</option>
                             <option value="judge">Judge</option>
                             <option value="checkin">Check-in Volunteer</option>
+                            <option value="STAGE_1_WRISTBAND">— Stage 1 only</option>
+                            <option value="STAGE_2_TRANSPONDER">— Stage 2 only</option>
                         </select>
 
                         <select
@@ -628,13 +664,23 @@ export default function TeamPage() {
                                             </span>
                                         )}
 
-                                        {/* No stage badge: a counter is not a Stage 1 desk or a
-                                            Stage 2 desk any more, so there is nothing about this
-                                            volunteer that a badge could truthfully say. */}
                                         {u.role === "checkin" && (
-                                            <span className="inline-flex items-center gap-1 rounded bg-blue-950/40 border border-blue-800/30 px-2 py-0.5 text-[11px] text-blue-200">
-                                                Both hand-overs
-                                            </span>
+                                            stageShort(u.checkinStage) ? (
+                                                // "Stage", not "Counter": there is no counter to be
+                                                // at any more — the stage on the volunteer IS the
+                                                // assignment, and calling it a counter sent people
+                                                // looking for one in the volunteer app.
+                                                <span className="inline-flex items-center gap-1 rounded bg-blue-950/40 border border-blue-800/30 px-2 py-0.5 text-[11px] text-blue-200">
+                                                    <span>Stage:</span>
+                                                    <span className="font-bold text-blue-300">{stageShort(u.checkinStage)}</span>
+                                                </span>
+                                            ) : (
+                                                // A volunteer with no stage can sign in and do nothing, so
+                                                // it is called out rather than left as a blank.
+                                                <span className="inline-flex items-center gap-1 rounded bg-warn/10 border border-warn/30 px-2 py-0.5 text-[11px] text-warn font-bold">
+                                                    No stage set
+                                                </span>
+                                            )
                                         )}
                                     </div>
                                 </div>
@@ -659,6 +705,7 @@ export default function TeamPage() {
                                                     name: u.name ?? "",
                                                     role: u.role ?? "judge",
                                                     stationNumber: u.stationNumber ? String(u.stationNumber) : "",
+                                                    checkinStage: u.checkinStage ?? "STAGE_1_WRISTBAND",
                                                     pin: "",
                                                     enabled: !!u.enabled,
                                                 })
@@ -733,7 +780,20 @@ export default function TeamPage() {
                                     )}
                                 </select>
                             </div>
-                            {editingUser.role === "checkin" ? null : (
+                            {editingUser.role === "checkin" ? (
+                                <div>
+                                    <label className="text-xs font-semibold text-fog">Check-in stage *</label>
+                                    <select
+                                        value={editingUser.checkinStage}
+                                        onChange={(e) => setEditingUser({ ...editingUser, checkinStage: e.target.value })}
+                                        className="w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
+                                    >
+                                        {STAGES.map((s) => (
+                                            <option key={s.value} value={s.value}>{s.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            ) : (
                                 <div>
                                     <label className="text-xs font-semibold text-fog">Station/Segment Number (Optional)</label>
                                     <input

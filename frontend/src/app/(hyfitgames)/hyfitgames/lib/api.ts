@@ -168,9 +168,10 @@ export type JudgeUser = {
     // rest. The console's event picker reads this to know which it is.
     boundEventId?: string | null;
     stationNumber?: number;
-    // No check-in stage. A counter runs whichever hand-over the athlete in
-    // front of it is due, worked out from the equipment they already hold, so
-    // there is nothing about a stage to hold against a volunteer.
+    // Which check-in stage this volunteer staffs. Null for judges and for
+    // anyone not on a counter — it replaced the counter assignment tables when
+    // check-in state moved to RaceResult.
+    checkinStage?: "STAGE_1_WRISTBAND" | "STAGE_2_TRANSPONDER" | null;
     enabled: boolean;
 };
 

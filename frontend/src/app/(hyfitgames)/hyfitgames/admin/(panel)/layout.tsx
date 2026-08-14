@@ -7,41 +7,40 @@ import { useRequireAdmin } from "../../lib/guards";
 import HfgThemeToggle from "../../lib/theme-toggle";
 import { FieldSessionProvider, useFieldSession } from "../../lib/field-session";
 
-// The HYFIT field-operations console: run an event, staff it, and point it at
-// RaceResult. Everything here reads and writes `hyfit_v2` and nothing else.
+// The HYFIT field-operations console: run an event, staff it, point it at
+// RaceResult, and publish what came back. Everything here reads and writes
+// `hyfit_v2` and nothing else.
 //
-// The athlete-platform screens — Athletes, Timing, Results, Protests,
-// Announcements, and the event detail page with its roster, categories and
-// entries — are gone. They were views over the `hyfit` schema, which this
-// deployment does not have, so every one of them answered 500. They were also
-// the last thing in the console reading a roster from Postgres: the field apps
-// read theirs from RaceResult, and an admin screen quietly showing a different
-// set of athletes than the counters are working against is worse than no
+// The old athlete-platform screens — Timing, Protests, Announcements, and the
+// event detail page with its categories and entries — are gone. They were views
+// over the `hyfit` schema, which this deployment does not have, so every one of
+// them answered 500.
+//
+// Athletes and Results came back as `hyfit_v2` screens (migration 083), and the
+// distinction matters: both are a READ of what was imported from this event's
+// RaceResult endpoints, never a second roster. The counters and tablets resolve
+// a bib against RaceResult live, and an admin screen quietly showing a
+// different set of athletes than they are working against is worse than no
 // screen at all.
 const NAV = [
     { to: "/hyfitgames/admin", label: "Dashboard", icon: "◫", end: true },
     { to: "/hyfitgames/admin/events", label: "Events", icon: "▤" },
 ];
 
-// Team and Operations are screens of ONE event, so they are not fixed
-// destinations the way the entries above are — each needs an event id in its
-// path. The id comes from the event you are already looking at, and otherwise
-// from the field session's event, which is the one these two screens used to
-// assume silently. With neither, they point at the Events list: "choose which
-// event" is the honest answer, and it is what the old implicit behaviour got
-// wrong whenever no event was active.
+// These are screens of ONE event, so they are not fixed destinations the way
+// the entries above are — each needs an event id in its path. The id comes from
+// the event you are already looking at, and otherwise from the field session's
+// event, which is the one these screens used to assume silently. With neither,
+// they point at the Events list: "choose which event" is the honest answer, and
+// it is what the old implicit behaviour got wrong whenever no event was active.
+//
+// Ordered the way an event is actually run: staff it, wire it to RaceResult,
+// pull the start list, then publish what they did.
 const FIELD_NAV = [
     { segment: "team", label: "Team", icon: "♟" },
     { segment: "operations", label: "Operations", icon: "⚙" },
-];
-
-// Venue tools. They live outside the console and outside its session — the
-// download page has to open on a phone that has no app and no account — so they
-// are listed here only because the person handing out installers is the person
-// already looking at this sidebar.
-const TOOLS_NAV = [
-    { to: "/hyfitgames/tools/apps", label: "App downloads", icon: "⬇" },
-    { to: "/hyfitgames/tools/qr", label: "QR generator", icon: "▦" },
+    { segment: "athletes", label: "Athletes", icon: "♞" },
+    { segment: "results", label: "Results", icon: "▣" },
 ];
 
 function eventIdFromPath(pathname: string): string | null {
@@ -137,25 +136,6 @@ function AdminShell({ children }: { children: React.ReactNode }) {
                             {n.label}
                         </Link>
                     ))}
-                    <div className="mt-4 mb-1 border-t border-smoke pt-3">
-                        <span className="px-3 text-[10px] font-bold uppercase tracking-widest text-fog">
-                            Tools
-                        </span>
-                    </div>
-                    {TOOLS_NAV.map((n) => (
-                        <Link
-                            key={n.to}
-                            href={appPath(n.to)}
-                            className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                                isActive(n.to)
-                                    ? "bg-hyred/15 text-hyred-ink"
-                                    : "text-fog hover:text-chalk hover:bg-smoke/40"
-                            }`}
-                        >
-                            <span className="w-5 text-center text-base">{n.icon}</span>
-                            {n.label}
-                        </Link>
-                    ))}
                 </nav>
                 <div className="border-t border-smoke px-3 py-3">
                     <button
@@ -190,7 +170,7 @@ function AdminShell({ children }: { children: React.ReactNode }) {
                         {/* Keyed by label, not `to`: without an event the field
                             entries both fall back to the Events list, so their
                             hrefs collide with each other and with Events. */}
-                        {[...NAV, ...fieldNav, ...TOOLS_NAV].map((n) => (
+                        {[...NAV, ...fieldNav].map((n) => (
                             <option key={n.label} value={appPath(n.to)}>
                                 {n.label}
                             </option>

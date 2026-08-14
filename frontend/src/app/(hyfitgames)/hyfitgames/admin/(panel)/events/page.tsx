@@ -32,6 +32,11 @@ type EventRow = {
     event_date: string | null;
     timezone: string;
     platformEventId: string | null;
+    // What this event is publishing to athletes: nothing, the cached RaceResult
+    // pull, or the results stored in the database. Written through
+    // PUT /admin/results/mode, which owns the column.
+    results_mode: "off" | "live" | "stored";
+    results_stored_at: string | null;
 };
 
 const STATUSES = ["draft", "ready", "live", "closed", "archived"];
@@ -51,6 +56,9 @@ export default function AdminEvents() {
     const [filter, setFilter] = useState("all");
     const [msg, setMsg] = useState("");
     const [err, setErr] = useState("");
+    // Which row is mid-action. Going live is three calls, so the button has to
+    // say so rather than looking ignored for a second and a half.
+    const [busy, setBusy] = useState("");
 
     const load = useCallback(async () => {
         setErr("");
@@ -85,6 +93,116 @@ export default function AdminEvents() {
             await load();
         } catch (e: any) {
             setErr(e.message);
+        }
+    };
+
+    /* Go live: one button, three things, in the order that keeps them honest.
+     *
+     *   1. the event is running        PATCH status = live
+     *   2. there are standings to show POST results/pull  (into the cache)
+     *   3. athletes may see them       PUT  results/mode = live
+     *
+     * The pull comes BEFORE the mode. Flipping the mode first would publish an
+     * empty board — the athlete pages read the cache, and a live event with
+     * nothing cached shows "no results published" to everyone who looks. If the
+     * pull fails (usually no results endpoint configured yet), the event is
+     * still live operationally and the error says what is missing, which is the
+     * true state of things rather than a half-published race.
+     */
+    const goLive = async (row: EventRow) => {
+        setBusy(row.id);
+        setErr("");
+        setMsg("");
+        try {
+            if (row.status !== "live") {
+                await judgeApi("/admin/events", {
+                    method: "PATCH",
+                    body: JSON.stringify({ id: row.id, status: "live" }),
+                });
+            }
+            const pulled = await judgeApi<{ rows: unknown[] }>(
+                `/admin/results/pull?eventId=${encodeURIComponent(row.id)}`,
+                { method: "POST", body: JSON.stringify({ store: false }) },
+            );
+            await judgeApi(`/admin/results/mode?eventId=${encodeURIComponent(row.id)}`, {
+                method: "PUT",
+                body: JSON.stringify({ mode: "live" }),
+            });
+            setMsg(`${row.name} is live · ${pulled.rows.length} results published to athletes`);
+            setTimeout(() => setMsg(""), 4000);
+            await load();
+        } catch (e: any) {
+            setErr(e.message);
+            await load();
+        } finally {
+            setBusy("");
+        }
+    };
+
+    /* Re-pull the feed for an event that is already live. The mode is untouched
+     * — it is already 'live' — so this is only ever "the standings moved on". */
+    const refreshLive = async (row: EventRow) => {
+        setBusy(row.id);
+        setErr("");
+        setMsg("");
+        try {
+            const pulled = await judgeApi<{ rows: unknown[] }>(
+                `/admin/results/pull?eventId=${encodeURIComponent(row.id)}`,
+                { method: "POST", body: JSON.stringify({ store: false }) },
+            );
+            setMsg(`${row.name} · ${pulled.rows.length} results refreshed`);
+            setTimeout(() => setMsg(""), 4000);
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy("");
+        }
+    };
+
+    /* Empty this event's cached pull. Separate from Stop on purpose: Stop
+     * unpublishes and leaves the rows there to publish again, this throws the
+     * rows away and leaves the switch alone. An event still in live mode after
+     * this shows athletes nothing until the next pull, which the message says
+     * out loud. */
+    const clearCache = async (row: EventRow) => {
+        setBusy(row.id);
+        setErr("");
+        setMsg("");
+        try {
+            await judgeApi(`/admin/results/discard?eventId=${encodeURIComponent(row.id)}`, {
+                method: "POST",
+                body: JSON.stringify({}),
+            });
+            setMsg(
+                row.results_mode === "live"
+                    ? `${row.name} · cache cleared — athletes see no results until the next pull`
+                    : `${row.name} · cache cleared`,
+            );
+            setTimeout(() => setMsg(""), 4000);
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy("");
+        }
+    };
+
+    /* Stop publishing without touching the event's own status: a race can still
+     * be running while the organiser takes a wrong board down. */
+    const stopPublishing = async (row: EventRow) => {
+        setBusy(row.id);
+        setErr("");
+        try {
+            await judgeApi(`/admin/results/mode?eventId=${encodeURIComponent(row.id)}`, {
+                method: "PUT",
+                body: JSON.stringify({ mode: "off" }),
+            });
+            setMsg(`${row.name} results are no longer published`);
+            setTimeout(() => setMsg(""), 3000);
+            await load();
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy("");
         }
     };
 
@@ -160,6 +278,12 @@ export default function AdminEvents() {
                                         <Chip tone={row.status === "live" ? "live" : row.status === "closed" ? "ok" : "default"}>
                                             {row.status}
                                         </Chip>
+                                        {/* What athletes can see right now. The
+                                            event's own status says the crew is
+                                            running it; this says the standings
+                                            are on their phones. */}
+                                        {row.results_mode === "live" && <Chip tone="live">Live results</Chip>}
+                                        {row.results_mode === "stored" && <Chip tone="ok">Results published</Chip>}
                                     </div>
                                     <p className="mt-1 text-xs text-fog">
                                         {when(row)} · {row.venue || "Venue TBD"}
@@ -171,6 +295,43 @@ export default function AdminEvents() {
                                         staff account with no event of its own
                                         resolves to the active one, so somebody has
                                         to say which. */}
+                                    {/* The day's main control. One press puts
+                                        the event live, pulls the standings into
+                                        the cache and publishes them to
+                                        /hyfitgames — see goLive. */}
+                                    {row.results_mode === "live" ? (
+                                        <>
+                                            <button
+                                                disabled={busy === row.id}
+                                                onClick={() => void refreshLive(row)}
+                                                className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                                            >
+                                                {busy === row.id ? "Refreshing…" : "Refresh results"}
+                                            </button>
+                                            <button
+                                                disabled={busy === row.id}
+                                                onClick={() => void clearCache(row)}
+                                                className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
+                                            >
+                                                Clear cache
+                                            </button>
+                                            <button
+                                                disabled={busy === row.id}
+                                                onClick={() => void stopPublishing(row)}
+                                                className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
+                                            >
+                                                Stop
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <button
+                                            disabled={busy === row.id}
+                                            onClick={() => void goLive(row)}
+                                            className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                                        >
+                                            {busy === row.id ? "Going live…" : "Go live"}
+                                        </button>
+                                    )}
                                     <button
                                         disabled={row.is_active}
                                         onClick={() =>
@@ -185,6 +346,18 @@ export default function AdminEvents() {
                                         className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk"
                                     >
                                         Operations
+                                    </Link>
+                                    <Link
+                                        href={appPath(`/hyfitgames/admin/events/${row.id}/athletes`)}
+                                        className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk"
+                                    >
+                                        Athletes
+                                    </Link>
+                                    <Link
+                                        href={appPath(`/hyfitgames/admin/events/${row.id}/results`)}
+                                        className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk"
+                                    >
+                                        Results
                                     </Link>
                                     <Link
                                         href={appPath(`/hyfitgames/admin/events/${row.id}/team`)}

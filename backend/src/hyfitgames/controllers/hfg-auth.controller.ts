@@ -13,13 +13,14 @@ import * as crypto from 'node:crypto';
 import * as bcrypt from 'bcrypt';
 import { Public } from '../../common/decorators/public.decorator';
 import { HfgAdminGuard } from '../guards/hfg-admin.guard';
-import { HfgAdminId } from '../decorators/hfg-user.decorator';
+import { HfgAthleteGuard } from '../guards/hfg-athlete.guard';
+import { HfgAdminId, HfgAthleteId } from '../decorators/hfg-user.decorator';
 import { HfgDbService } from '../hfg-db.service';
 import { hfgConfig } from '../hfg.config';
 import { signAccess } from '../hfg-jwt.util';
 import { HfgOtpService } from '../services/hfg-otp.service';
 import { HjudgeAuthService } from '../../hyfit-judge/services/hjudge-auth.service';
-import { publicAthlete } from '../hfg.util';
+import { publicAthleteV2 } from '../hfg.util';
 
 // HYFIT Games auth. All routes are @Public() so the host app's global
 // JwtAuthGuard/RolesGuard don't intercept them — the module verifies its own
@@ -33,10 +34,11 @@ export class HfgAuthController {
     private readonly judgeAuth: HjudgeAuthService,
   ) {}
 
-  // Two token stores, because the two identities live in two schemas since 080:
-  // an athlete is a row on the athlete platform, a console operator is a row in
-  // hyfit_v2. Each token is written beside the row it belongs to, so neither
-  // table carries a foreign key it cannot satisfy.
+  // Two token stores, because the two identities are two different things: an
+  // athlete is a person who races, a console operator is a staff account.
+  // `hyfit_v2.refresh_tokens.user_id` references hyfit_v2.users, which an
+  // athlete is not a row in — hence a table each, and each token written beside
+  // the row it belongs to.
   private async issueRefresh(opts: {
     athleteId?: string | null;
     adminId?: string | null;
@@ -51,12 +53,43 @@ export class HfgAuthController {
       );
     } else {
       await this.db.q(
-        `INSERT INTO refresh_tokens (athlete_id, token_hash, expires_at)
+        `INSERT INTO hyfit_v2.athlete_refresh_tokens (athlete_id, token_hash, expires_at)
          VALUES ($1, $2, now() + ($3 || ' days')::interval)`,
         [opts.athleteId ?? null, hash, hfgConfig.refreshTtlDays],
       );
     }
     return raw;
+  }
+
+  /* Everyone this number belongs to.
+   *
+   * A number can hold SEVERAL athletes, and that is a direct consequence of the
+   * identity being phone + name (migration 084): a parent enters two children
+   * on their own number and those are two people, not one. So the login proves
+   * the NUMBER and then says which of them is signing in.
+   *
+   * Matched on `mobile_key` — digits only, last ten — rather than on the stored
+   * string, because the number an athlete types is not spelled the way the
+   * organiser's export spelled it, and requiring that would lock out most of
+   * the field. All queries here are schema-qualified: this pool's search_path
+   * is the athlete platform's dropped schema, so every table has to be named.
+   */
+  private async athletesOnNumber(mobile: string) {
+    // ONE ROW PER NAME, not per entry. Since 085 the table holds a row per
+    // athlete per category per event, so a number that raced three contests
+    // would otherwise offer three identical "profiles" to sign in as. DISTINCT
+    // ON collapses them to the person, and the row it keeps is the newest —
+    // the most recent spelling of their profile.
+    const { rows } = await this.db.q(
+      `SELECT DISTINCT ON (hyfit_v2.name_key(name))
+              id, name, mobile, email, gender, date_of_birth, city, is_active
+         FROM hyfit_v2.athletes
+        WHERE hyfit_v2.mobile_key(mobile) = hyfit_v2.mobile_key($1)
+          AND is_active
+        ORDER BY hyfit_v2.name_key(name), created_at DESC`,
+      [mobile],
+    );
+    return rows;
   }
 
   /* POST /api/hyfitgames/auth/otp/request  { mobile } */
@@ -65,11 +98,8 @@ export class HfgAuthController {
     const mobile = this.otp.normalizeMobile(body.mobile);
     if (!mobile) throw new BadRequestException('Enter a valid mobile number');
 
-    const { rows } = await this.db.q(
-      'SELECT id FROM athletes WHERE mobile = $1 AND is_active',
-      [mobile],
-    );
-    if (!rows.length)
+    const athletes = await this.athletesOnNumber(mobile);
+    if (!athletes.length)
       throw new BadRequestException(
         'This number is not registered. Contact the organiser.',
       );
@@ -77,28 +107,85 @@ export class HfgAuthController {
     return { ok: true, message: 'OTP sent' };
   }
 
-  /* POST /api/hyfitgames/auth/otp/verify  { mobile, code } */
+  /* POST /api/hyfitgames/auth/otp/verify  { mobile, code, athleteId? }
+   *
+   * Signs in as the one athlete on the number, or as the named one when the
+   * number holds several. `profiles` comes back either way so the client can
+   * offer the switch without a second round trip. */
   @Post('otp/verify')
-  async otpVerify(@Body() body: { mobile?: string; code?: string }) {
+  async otpVerify(
+    @Body() body: { mobile?: string; code?: string; athleteId?: string },
+  ) {
     const mobile = this.otp.normalizeMobile(body.mobile);
     if (!mobile || !/^\d{6}$/.test(String(body.code || '')))
       throw new BadRequestException('Enter the 6-digit OTP');
 
-    const { rows } = await this.db.q(
-      'SELECT * FROM athletes WHERE mobile = $1 AND is_active',
-      [mobile],
-    );
-    const athlete = rows[0];
-
-    if (!athlete)
+    const athletes = await this.athletesOnNumber(mobile);
+    if (!athletes.length)
       throw new BadRequestException(
         'This number is not registered. Contact the organiser.',
       );
 
+    // The chosen profile must be ON this number. Without the check, a valid OTP
+    // for one number would mint a token for any athlete id the caller cared to
+    // name — which is every account on the platform.
+    const chosen = body.athleteId
+      ? athletes.find((a) => a.id === body.athleteId)
+      : athletes[0];
+    if (!chosen)
+      throw new BadRequestException('That profile is not on this number');
+
+    // Consumed only once the profile has been resolved, so a bad athleteId does
+    // not burn the code the athlete just received.
     await this.otp.verifyOtp(mobile, body.code);
-    const accessToken = await signAccess('athlete', athlete.id);
-    const refreshToken = await this.issueRefresh({ athleteId: athlete.id });
-    return { accessToken, refreshToken, athlete: publicAthlete(athlete) };
+    // Stamped across every row this person holds, not just the one the token
+    // will name: they are one athlete signing in, however many contests they
+    // have entered.
+    await this.db.q(
+      `UPDATE hyfit_v2.athletes SET last_login_at = now()
+        WHERE hyfit_v2.mobile_key(mobile) = hyfit_v2.mobile_key($1)
+          AND hyfit_v2.name_key(name) = hyfit_v2.name_key($2)`,
+      [chosen.mobile, chosen.name],
+    );
+
+    const accessToken = await signAccess('athlete', chosen.id);
+    const refreshToken = await this.issueRefresh({ athleteId: chosen.id });
+    return {
+      accessToken,
+      refreshToken,
+      athlete: publicAthleteV2(chosen),
+      profiles: athletes.map((a) => ({ id: a.id, full_name: a.name })),
+    };
+  }
+
+  /* POST /api/hyfitgames/auth/profile/switch  { athleteId }
+   *
+   * Move to another person on the SAME number without a second OTP. The number
+   * was already proved at login and has not changed; asking for a code again
+   * would only be theatre. The token's own athlete decides which number that
+   * is, so this cannot reach an account the caller has not authenticated. */
+  @Post('profile/switch')
+  @UseGuards(HfgAthleteGuard)
+  async switchProfile(
+    @HfgAthleteId() athleteId: string,
+    @Body() body: { athleteId?: string },
+  ) {
+    const { rows } = await this.db.q(
+      `SELECT t.id, t.name, t.mobile, t.email, t.gender, t.date_of_birth, t.city
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes t
+           ON hyfit_v2.mobile_key(t.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.mobile_key(me.mobile) <> ''
+        WHERE me.id = $1 AND t.id = $2 AND t.is_active`,
+      [athleteId, String(body.athleteId ?? '')],
+    );
+    const target = rows[0];
+    if (!target)
+      throw new UnauthorizedException('That profile is not on your number');
+
+    const accessToken = await signAccess('athlete', target.id);
+    const refreshToken = await this.issueRefresh({ athleteId: target.id });
+    return { accessToken, refreshToken, athlete: publicAthleteV2(target) };
   }
 
   /* POST /api/hyfitgames/auth/refresh  { refreshToken } */
@@ -129,7 +216,9 @@ export class HfgAuthController {
         [token.user_id],
       );
       if (!a[0])
-        throw new UnauthorizedException('Session expired — please log in again');
+        throw new UnauthorizedException(
+          'Session expired — please log in again',
+        );
       const accessToken = await signAccess('admin', token.user_id, {
         role: a[0].role,
       });
@@ -138,17 +227,22 @@ export class HfgAuthController {
     }
 
     const { rows } = await this.db.q(
-      `SELECT * FROM refresh_tokens
-        WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()`,
+      `SELECT t.id, t.athlete_id
+         FROM hyfit_v2.athlete_refresh_tokens t
+         JOIN hyfit_v2.athletes a ON a.id = t.athlete_id AND a.is_active
+        WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND t.expires_at > now()`,
       [hash],
     );
     const t = rows[0];
+    // Joined to the athlete rather than read alone, so an account disabled by
+    // the organiser stops at the next rotation instead of living as long as the
+    // refresh token — the same rule the console's branch above applies.
     if (!t)
       throw new UnauthorizedException('Session expired — please log in again');
 
     // rotate
     await this.db.q(
-      'UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1',
+      'UPDATE hyfit_v2.athlete_refresh_tokens SET revoked_at = now() WHERE id = $1',
       [t.id],
     );
     const accessToken = await signAccess('athlete', t.athlete_id);
@@ -171,7 +265,7 @@ export class HfgAuthController {
       [hash],
     );
     await this.db.q(
-      'UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1',
+      'UPDATE hyfit_v2.athlete_refresh_tokens SET revoked_at = now() WHERE token_hash = $1',
       [hash],
     );
     return { ok: true };

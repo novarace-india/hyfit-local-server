@@ -12,13 +12,29 @@ export default function Dashboard() {
     const [err, setErr] = useState("");
 
     useEffect(() => {
-        Promise.all([api("/me"), api("/me/events"), api("/me/stats")])
-            .then(([m, e, s]) => {
-                setMe(m);
-                setEvents(e);
-                setStats(s);
-            })
-            .catch((e) => setErr(e.message));
+        let cancelled = false;
+        const load = (first: boolean) =>
+            Promise.all([api("/me"), api("/me/events"), api("/me/stats")])
+                .then(([m, e, s]) => {
+                    if (cancelled) return;
+                    setMe(m);
+                    setEvents(e);
+                    setStats(s);
+                })
+                // Only the first load may blank the screen. A refresh that fails
+                // — a tunnel, a venue wifi drop — must not throw away standings
+                // the athlete is reading.
+                .catch((e) => first && setErr(e.message));
+
+        void load(true);
+        // While a race is on, the standings move. Thirty seconds is slower than
+        // the organiser can publish and far slower than the race changes;
+        // polling harder would only mean more load for the same numbers.
+        const timer = setInterval(() => void load(false), 30_000);
+        return () => {
+            cancelled = true;
+            clearInterval(timer);
+        };
     }, []);
 
     if (err) return <main className="p-5"><ErrorNote msg={err} /></main>;
@@ -57,14 +73,24 @@ export default function Dashboard() {
             <SectionTitle>{next?.status === "live" ? "Happening now" : "Your next race"}</SectionTitle>
             {next ? (
                 <Link
-                    href={appPath(`/hyfitgames/events/${next.event_id}`)}
+                    // The live results page, not the old race hub:
+                    // that hub reads the `hyfit` schema this deployment no
+                    // longer has, so every link into it 500s. This one is
+                    // served from the event's own results feed.
+                    href={appPath(`/hyfitgames/live-results/${next.event_id}`)}
                     className="block rounded-2xl border border-smoke bg-gradient-to-br from-coal to-ink p-5"
                 >
                     <div className="flex items-start justify-between gap-3">
                         <div>
                             <h2 className="text-xl font-black tracking-wide">{next.name.toUpperCase()}</h2>
                             <p className="mt-1 text-sm text-fog">
-                                {fmtDate(next.event_date)} · {next.city}
+                                {/* The venue, not a city: a hyfit_v2 event has
+                                    no city of its own — publishing an event is
+                                    the listing's job and duplicating the place
+                                    is how two tables start disagreeing about
+                                    where a race is. */}
+                                {fmtDate(next.event_date)}
+                                {next.venue ? ` · ${next.venue}` : ""}
                             </p>
                         </div>
                         {next.status === "live" ? <Chip tone="live">Live</Chip> : <Chip>Upcoming</Chip>}
@@ -80,7 +106,7 @@ export default function Dashboard() {
                             </p>
                             {nextEntries.map((entry: any) => (
                                 <div
-                                    key={entry.registration_id}
+                                    key={entry.entry_id}
                                     className="flex items-baseline gap-2 text-sm"
                                 >
                                     <span className="text-lg font-black text-hyred-ink">{entry.bib}</span>
@@ -88,7 +114,7 @@ export default function Dashboard() {
                                     {entry.wave && <span className="text-fog">· {entry.wave}</span>}
                                 </div>
                             ))}
-                            <div className="pt-1 text-sm text-hyred-ink">Open race hub →</div>
+                            <div className="pt-1 text-sm text-hyred-ink">Open live results →</div>
                         </div>
                     ) : (
                         <div className="mt-4 flex gap-6 text-sm">
@@ -108,7 +134,33 @@ export default function Dashboard() {
                                     <p className="truncate text-base font-black">{next.category}</p>
                                 </div>
                             )}
-                            <div className="ml-auto self-end text-hyred-ink">Open race hub →</div>
+                            <div className="ml-auto self-end text-hyred-ink">Open live results →</div>
+                        </div>
+                    )}
+
+                    {/* Your own standing, while the race is on.
+                        The numbers are the cached RaceResult pull the organiser
+                        publishes from the console — the same rows the venue
+                        screen and /hyfitgames/live-results serve, so this cannot
+                        disagree with either. They are provisional by
+                        construction, which is what the LIVE chip is for. */}
+                    {nextEntries.some((e: any) => e.is_live && e.total_ms) && (
+                        <div className="mt-4 space-y-2 border-t border-smoke pt-3">
+                            {nextEntries
+                                .filter((e: any) => e.is_live && e.total_ms)
+                                .map((e: any) => (
+                                    <div key={`live-${e.entry_id}`} className="flex items-center gap-3">
+                                        <Chip tone="live">Live</Chip>
+                                        <span className="text-2xl font-black">{fmtMs(e.team_time_ms ?? e.total_ms)}</span>
+                                        {e.overall_rank && (
+                                            <span className="text-sm text-fog">
+                                                #{e.overall_rank}
+                                                {e.category ? ` · ${e.category}` : ""}
+                                            </span>
+                                        )}
+                                    </div>
+                                ))}
+                            <p className="text-xs text-fog">Provisional — updates as the organiser publishes.</p>
                         </div>
                     )}
                 </Link>
@@ -138,7 +190,7 @@ export default function Dashboard() {
             <div className="space-y-3">
                 {events.past.map((e: any) => (
                     <Link
-                        key={e.registration_id}
+                        key={e.entry_id}
                         // The event hub, not the bare result: it is the page that
                         // holds the leaderboard, the result and the race details
                         // together, so it is the right landing point from a race
@@ -150,7 +202,7 @@ export default function Dashboard() {
                         // same event page. Without this it would always resolve to
                         // whichever registration happened to come first, and the
                         // other two results would be unreachable from home.
-                        href={appPath(`/hyfitgames/events/${e.event_id}?reg=${e.registration_id}`)}
+                        href={appPath(`/hyfitgames/live-results/${e.event_id}`)}
                         className="flex items-center justify-between rounded-xl border border-smoke bg-coal px-4 py-3"
                     >
                         <div className="min-w-0">
@@ -166,8 +218,8 @@ export default function Dashboard() {
                         </div>
                         <div className="text-right">
                             {/* A pair's result is the team's time, not their own leg. */}
-                            <p className="text-lg font-black">{fmtMs(e.team_total_ms ?? e.total_ms)}</p>
-                            <div className="mt-0.5">{statusChip(e.reg_status)}</div>
+                            <p className="text-lg font-black">{fmtMs(e.team_time_ms ?? e.total_ms)}</p>
+                            <div className="mt-0.5">{statusChip(e.race_status)}</div>
                         </div>
                     </Link>
                 ))}

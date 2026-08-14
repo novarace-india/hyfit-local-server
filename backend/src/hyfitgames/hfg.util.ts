@@ -116,6 +116,38 @@ export function teamColumns(entry = 'ce', result = 'res') {
 
 export const TEAM_COLUMNS = teamColumns();
 
+/* The same projection for a `hyfit_v2.athletes` row (migration 084).
+ *
+ * Two things it does beyond selecting columns, both so the athlete app did not
+ * have to be rewritten around the new table: `name` is served as `full_name`
+ * and `date_of_birth` as `dob`, which are the names every screen already reads.
+ *
+ * The columns the old athlete row carried and this one does not — blood group,
+ * t-shirt size, emergency contact, photo — come back as null rather than being
+ * omitted, so a page reading them renders an empty field instead of crashing on
+ * a missing property.
+ */
+export function publicAthleteV2(a: any) {
+  return {
+    id: a.id,
+    mobile: a.mobile ?? null,
+    full_name: a.name ?? '',
+    email: a.email ?? null,
+    gender: a.gender ?? null,
+    dob: a.date_of_birth ?? null,
+    city: a.city ?? null,
+    state: null,
+    blood_group: null,
+    tshirt_size: null,
+    emergency_name: null,
+    emergency_phone: null,
+    photo_url: null,
+    // A profile is complete when the two things this platform actually needs
+    // are present: something to call them and a way to reach them.
+    profile_complete: Boolean(String(a.name ?? '').trim() && a.mobile),
+  };
+}
+
 // Public athlete projection — the safe subset of the athletes row returned to
 // clients. Ported from the module's routes/auth.js `publicAthlete`.
 export function publicAthlete(a: any) {

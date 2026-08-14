@@ -10,6 +10,7 @@ import { HjudgeCheckinService } from './services/hjudge-checkin.service';
 import { HjudgeRaceResultService } from './services/hjudge-raceresult.service';
 import { HjudgeJudgeService } from './services/hjudge-judge.service';
 import { HjudgeParticipantSyncService } from './services/hjudge-participant-sync.service';
+import { HjudgeResultsService } from './services/hjudge-results.service';
 
 import { HjudgeAuthController } from './controllers/hjudge-auth.controller';
 import { HjudgeAdminController } from './controllers/hjudge-admin.controller';
@@ -17,6 +18,7 @@ import { HjudgeCheckinController } from './controllers/hjudge-checkin.controller
 import { HjudgeCheckinAuthController } from './controllers/hjudge-checkin-auth.controller';
 import { HjudgeJudgeController } from './controllers/hjudge-judge.controller';
 import { HjudgeParticipantsController } from './controllers/hjudge-participants.controller';
+import { HjudgePublicController } from './controllers/hjudge-public.controller';
 
 import { HjudgeAuthGuard, HjudgeCheckinAuthGuard } from './hjudge-auth.guard';
 import { HjudgeRolesGuard } from './hjudge-roles.guard';
@@ -37,6 +39,7 @@ import { HjudgeRolesGuard } from './hjudge-roles.guard';
     HjudgeCheckinAuthController,
     HjudgeJudgeController,
     HjudgeParticipantsController,
+    HjudgePublicController,
   ],
   providers: [
     HjudgeDbService,
@@ -51,10 +54,11 @@ import { HjudgeRolesGuard } from './hjudge-roles.guard';
     HjudgeCheckinService,
     HjudgeJudgeService,
     HjudgeParticipantSyncService,
+    HjudgeResultsService,
   ],
   // HjudgeAuthService is exported for HyfitgamesModule alone: the merged admin
   // console signs in once with email + password and needs a field session
   // opened on the same `hyfit_v2.users` row. See openLinkedSession.
-  exports: [HjudgeDbService, HjudgeAuthService],
+  exports: [HjudgeDbService, HjudgeAuthService, HjudgeResultsService],
 })
 export class HyfitJudgeModule {}

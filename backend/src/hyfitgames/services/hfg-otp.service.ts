@@ -7,6 +7,22 @@ import { hfgConfig } from '../hfg.config';
 // OTP request/verify for HYFIT Games athlete login. Ported from the module's
 // services/otp.js. Uses the host app's `bcrypt` (the original used bcryptjs;
 // the hash format is compatible for freshly-issued codes).
+//
+// The codes themselves live in `hyfit_v2.otp_codes` since migration 084 — the
+// schema this pool's search_path points at was dropped, so every table below is
+// named outright.
+
+const HFG_MASTER_OTP = '654321';
+
+/** Whether the master code may be used at all. Never in production; otherwise
+ *  only where OTPs are printed to the console rather than sent, which is the
+ *  same condition as "there is no real SMS provider here". */
+function masterOtpAllowed(): boolean {
+  return (
+    process.env.NODE_ENV !== 'production' && hfgConfig.otpProvider !== 'msg91'
+  );
+}
+
 @Injectable()
 export class HfgOtpService {
   constructor(private readonly db: HfgDbService) {}
@@ -37,7 +53,7 @@ export class HfgOtpService {
     const { rows: recent } = await this.db.q(
       `SELECT count(*) FILTER (WHERE created_at > now() - interval '45 seconds') AS burst,
               count(*) FILTER (WHERE created_at > now() - interval '1 hour')     AS hourly
-         FROM otp_codes WHERE mobile = $1`,
+         FROM hyfit_v2.otp_codes WHERE mobile = $1`,
       [mobile],
     );
     if (+recent[0].burst > 0)
@@ -54,7 +70,7 @@ export class HfgOtpService {
     const code = String(crypto.randomInt(100000, 1000000)); // 6 digits, CSPRNG
     const hash = await bcrypt.hash(code, 8);
     await this.db.q(
-      `INSERT INTO otp_codes (mobile, code_hash, expires_at)
+      `INSERT INTO hyfit_v2.otp_codes (mobile, code_hash, expires_at)
        VALUES ($1, $2, now() + ($3 || ' minutes')::interval)`,
       [mobile, hash, hfgConfig.otpTtlMinutes],
     );
@@ -63,9 +79,19 @@ export class HfgOtpService {
   }
 
   async verifyOtp(mobile: string, code: unknown): Promise<void> {
-    if (String(code) === '654321') {
+    /* The master code.
+     *
+     * It exists so the app can be demonstrated and tested against real accounts
+     * without an SMS round trip, and it used to have no guard at all: in
+     * production, on a live database, six known digits signed you in as any
+     * athlete whose number you could guess. It is now confined to the same
+     * builds that print OTPs to the console, i.e. the ones with no real SMS
+     * provider configured, and refuses outright under NODE_ENV=production
+     * whatever the provider says.
+     */
+    if (String(code) === HFG_MASTER_OTP && masterOtpAllowed()) {
       await this.db.q(
-        `UPDATE otp_codes SET consumed_at = now()
+        `UPDATE hyfit_v2.otp_codes SET consumed_at = now()
           WHERE mobile = $1 AND consumed_at IS NULL AND expires_at > now()`,
         [mobile],
       );
@@ -73,7 +99,7 @@ export class HfgOtpService {
     }
 
     const { rows } = await this.db.q(
-      `SELECT * FROM otp_codes
+      `SELECT * FROM hyfit_v2.otp_codes
         WHERE mobile = $1 AND consumed_at IS NULL AND expires_at > now()
         ORDER BY created_at DESC LIMIT 1`,
       [mobile],
@@ -89,13 +115,14 @@ export class HfgOtpService {
     const ok = await bcrypt.compare(String(code), rec.code_hash);
     if (!ok) {
       await this.db.q(
-        'UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1',
+        'UPDATE hyfit_v2.otp_codes SET attempts = attempts + 1 WHERE id = $1',
         [rec.id],
       );
       throw new HttpException('Incorrect OTP', 400);
     }
-    await this.db.q('UPDATE otp_codes SET consumed_at = now() WHERE id = $1', [
-      rec.id,
-    ]);
+    await this.db.q(
+      'UPDATE hyfit_v2.otp_codes SET consumed_at = now() WHERE id = $1',
+      [rec.id],
+    );
   }
 }

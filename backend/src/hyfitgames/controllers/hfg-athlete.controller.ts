@@ -13,21 +13,48 @@ import { Public } from '../../common/decorators/public.decorator';
 import { HfgDbService } from '../hfg-db.service';
 import { HfgAthleteGuard } from '../guards/hfg-athlete.guard';
 import { HfgAthleteId } from '../decorators/hfg-user.decorator';
-import { publicAthlete, TEAM_COLUMNS } from '../hfg.util';
-import { HfgLiveResultsService } from '../services/hfg-live-results.service';
+import { publicAthleteV2, TEAM_COLUMNS } from '../hfg.util';
+import {
+  HjudgeResultsService,
+  entryKey,
+} from '../../hyfit-judge/services/hjudge-results.service';
 
 // Athlete self-service: profile, my events, cross-edition stats, my result,
 // protests, and the rich performance dashboard (full-stats).
-// Ported from routes/athlete.js and routes/fullstats.js. Mounted under
-// /api/hyfitgames/me. @Public() bypasses the host global guards; the module's
-// own HfgAthleteGuard enforces the athlete session.
+// Mounted under /api/hyfitgames/me. @Public() bypasses the host global guards;
+// the module's own HfgAthleteGuard enforces the athlete session.
+//
+// HALF THIS CONTROLLER IS LIVE AND HALF IS NOT, and the line between them is
+// which schema it names. `me`, `updateMe`, `events` and `stats` were re-homed
+// onto `hyfit_v2` (migrations 083–085) and work: they read the athlete's rows
+// and the results imported from RaceResult.
+//
+// WHO AN ATHLETE IS, since 085: `hyfit_v2.athletes` holds one row per athlete
+// per category per event, so a person is the SET of rows sharing a phone and a
+// name. The token names one of those rows; every route below that shows a
+// history joins the table to itself on the two key functions to find the rest.
+// Reading the token's row alone would show somebody a single event and call it
+// their record.
+//
+// Everything below `stats` — the per-registration result, protests and
+// full-stats — still addresses `category_entries`, `registrations`, `splits`
+// and `stations` through this pool's search_path, which points at the dropped
+// `hyfit` schema. Those routes answer 500 and have done since the cutover.
+// They are left as they are rather than half-ported: protests and per-station
+// splits have no home in hyfit_v2 yet, and inventing one to make a route return
+// 200 would be worse than the 500 that says the feature is not there.
 @Public()
 @UseGuards(HfgAthleteGuard)
 @Controller('hyfitgames/me')
 export class HfgAthleteController {
   constructor(
     private readonly db: HfgDbService,
-    private readonly live: HfgLiveResultsService,
+    // The hyfit_v2 live feed, borrowed from the field module rather than
+    // reimplemented: it owns the Valkey key and the mode check. The athlete
+    // platform's own HfgLiveResultsService is NOT injected here any more — it
+    // reads the dropped `hyfit` schema, and the one handler that used it now
+    // reads this one.
+    private readonly liveResults: HjudgeResultsService,
   ) {}
 
   private static readonly PROFILE_FIELDS = new Set([
@@ -46,21 +73,30 @@ export class HfgAthleteController {
   /* GET /api/hyfitgames/me */
   @Get()
   async me(@HfgAthleteId() athleteId: string) {
-    const { rows } = await this.db.q('SELECT * FROM athletes WHERE id = $1', [
-      athleteId,
-    ]);
+    const { rows } = await this.db.q(
+      'SELECT * FROM hyfit_v2.athletes WHERE id = $1 AND is_active',
+      [athleteId],
+    );
     if (!rows[0]) throw new NotFoundException('Profile not found');
-    return publicAthlete(rows[0]);
+    return publicAthleteV2(rows[0]);
   }
 
-  /* PATCH /api/hyfitgames/me — mobile is NOT editable here (identity anchor;
-     changing it is an organiser-verified support flow). */
+  /* PATCH /api/hyfitgames/me
+   *
+   * Neither the mobile NOR the name is editable here: they are two thirds of
+   * the key (085), so letting an athlete rename themselves is letting them
+   * become a different person — or collide with one, and silently adopt their
+   * results. Both are organiser-verified support flows. What is left is the
+   * profile the athlete genuinely owns.
+   *
+   * It edits ONE row, the token's. A profile field written across every row
+   * sharing the phone and name would be the better behaviour and is not built:
+   * say so rather than pretending the single-row edit is the whole answer. */
   @Patch()
   async updateMe(
     @HfgAthleteId() athleteId: string,
     @Body() body: Record<string, unknown>,
   ) {
-    // Whitelist known fields; treat '' as NULL (mirrors the original zod schema).
     const fields: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(body || {})) {
       if (HfgAthleteController.PROFILE_FIELDS.has(k)) fields[k] = v;
@@ -68,45 +104,125 @@ export class HfgAthleteController {
     const keys = Object.keys(fields);
     if (!keys.length) throw new BadRequestException('Nothing to update');
 
-    const sets = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
-    const complete = `profile_complete = (
-        COALESCE(gender,'') <> '' AND dob IS NOT NULL AND
-        COALESCE(emergency_phone,'') <> '' AND COALESCE(city,'') <> '')`;
+    // The column names differ from the API's: the app has always said `dob`,
+    // the table says `date_of_birth`. Mapped here rather than renamed either
+    // side, because the API shape is what every athlete screen reads.
+    const COLUMN: Record<string, string> = {
+      email: 'email',
+      gender: 'gender',
+      dob: 'date_of_birth',
+      city: 'city',
+    };
+    const usable = keys.filter((k) => COLUMN[k]);
+    if (!usable.length)
+      throw new BadRequestException(
+        'Only email, gender, date of birth and city can be changed here',
+      );
+
+    const sets = usable.map((k, i) => `${COLUMN[k]} = $${i + 2}`).join(', ');
     const { rows } = await this.db.q(
-      `UPDATE athletes SET ${sets}, updated_at = now() WHERE id = $1
-       RETURNING *`,
-      [athleteId, ...keys.map((k) => (fields[k] === '' ? null : fields[k]))],
+      `UPDATE hyfit_v2.athletes SET ${sets} WHERE id = $1 RETURNING *`,
+      [athleteId, ...usable.map((k) => (fields[k] === '' ? null : fields[k]))],
     );
-    await this.db.q(`UPDATE athletes SET ${complete} WHERE id = $1`, [
-      athleteId,
-    ]);
-    return publicAthlete(rows[0]);
+    if (!rows[0]) throw new NotFoundException('Profile not found');
+    return publicAthleteV2(rows[0]);
   }
 
-  /* GET /api/hyfitgames/me/events — everything I'm part of, past and upcoming */
+  /* GET /api/hyfitgames/me/events — everything I'm part of, past and upcoming.
+   *
+   * One row per ENTRY, not per event: an athlete can hold several bibs at one
+   * event, one per category, and collapsing them would hide all but the first.
+   * The client groups by event_id where it needs to.
+   *
+   * Results are joined per row, and only for an event that has actually
+   * published them: `results_mode = 'stored'` is the organiser saying
+   * these numbers are real, and showing a mid-import row before that would put
+   * a time in front of an athlete that can still change. */
   @Get('events')
   async myEvents(@HfgAthleteId() athleteId: string) {
     const { rows } = await this.db.q(
-      `SELECT e.id AS event_id, e.name, e.edition, e.city, e.venue, e.event_date,
-              e.status, e.results_status, e.protest_deadline,
-              r.id AS registration_id, ce.bib, c.name AS category, ce.wave, ce.timeslot, ce.start_time, r.status AS reg_status,
-              ce.race_status, res.total_ms, res.overall_rank, res.gender_rank, res.age_group, res.age_group_rank,
-              ${TEAM_COLUMNS}
-         FROM registrations r
-         JOIN events e ON e.id = r.event_id
-         JOIN category_entries ce ON ce.registration_id = r.id
-         LEFT JOIN categories c ON c.id = ce.category_id
-         LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1
-        ORDER BY e.event_date DESC`,
+      // WHO THIS ATHLETE IS, since 085: the rows sharing their phone and name.
+      // The token names one row; the person is all of them. Matching on the
+      // token's row alone would show an athlete only the single event that row
+      // belongs to, which is the opposite of a history.
+      `SELECT e.id AS event_id, e.name, e.venue, e.event_date, e.status,
+              e.results_mode, e.timezone,
+              a.id AS entry_id, a.bib, a.category, a.club, a.wave, a.timeslot,
+              a.contest_date,
+              res.status AS race_status, res.total_ms, res.team_time_ms,
+              res.rank AS overall_rank, res.age_group_rank
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes a
+           ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+         JOIN hyfit_v2.events e ON e.id = a.event_id
+         LEFT JOIN hyfit_v2.results res
+                ON res.athlete_id = a.id AND e.results_mode = 'stored'
+        WHERE me.id = $1
+        ORDER BY e.event_date DESC NULLS LAST, e.created_at DESC`,
       [athleteId],
     );
-    return {
-      upcoming: rows.filter(
-        (x) => x.status === 'upcoming' || x.status === 'live',
+
+    /* The live overlay.
+     *
+     * An event running right now has no rows in `results` — that is the whole
+     * design: a pull writes to Valkey and nothing else until somebody stores
+     * it. So an athlete mid-race would see their entry with an empty time,
+     * while the same standings were on the venue screen. This puts the cached
+     * feed in front of them.
+     *
+     * It is a read of the SAME key the public board serves, through the same
+     * service, so the number an athlete sees on their phone and the number on
+     * the screen behind them cannot disagree. Only events actually in live mode
+     * are fetched — one Valkey GET each, and none at all for the usual case of
+     * an athlete whose races are all finished.
+     */
+    const liveEventIds: string[] = [
+      ...new Set<string>(
+        rows
+          .filter((r) => r.results_mode === 'live')
+          .map((r) => String(r.event_id)),
       ),
-      past: rows.filter(
-        (x) => x.status === 'completed' || x.status === 'cancelled',
+    ];
+    for (const eventId of liveEventIds) {
+      const payload = await this.liveResults
+        .publicResults(eventId)
+        .catch(() => null);
+      if (!payload) continue;
+      // Matched on bib AND category. An athlete racing two contests under one
+      // number has two entries here and two rows in the feed, and matching on
+      // the bib alone would put the same time and placing on both — telling
+      // them they finished their doubles race in their solo time.
+      const byEntry = new Map(
+        payload.rows.map((r) => [entryKey(r.bib, r.category), r]),
+      );
+      for (const row of rows) {
+        if (String(row.event_id) !== eventId) continue;
+        const live = byEntry.get(entryKey(String(row.bib), row.category));
+        if (!live) continue;
+        // Written into the same fields the stored path fills, so every screen
+        // renders one shape and does not have to know where the numbers came
+        // from. `is_live` is the one addition: whether a time is provisional is
+        // something the athlete is entitled to be told.
+        row.race_status = live.status;
+        row.total_ms = live.total_ms;
+        row.team_time_ms = live.team_time_ms;
+        row.overall_rank = live.rank;
+        row.age_group_rank = live.age_group_rank;
+        row.is_live = true;
+      }
+    }
+
+    // hyfit_v2 statuses are operational (draft/ready/live/closed/archived), not
+    // the athlete-facing ones the old schema had. An event is in your future
+    // until it closes — 'draft' included, because an athlete on the start list
+    // of an event still being set up is still racing it.
+    return {
+      upcoming: rows.filter((x) =>
+        ['draft', 'ready', 'live'].includes(String(x.status)),
+      ),
+      past: rows.filter((x) =>
+        ['closed', 'archived'].includes(String(x.status)),
       ),
     };
   }
@@ -128,99 +244,134 @@ export class HfgAthleteController {
     @HfgAthleteId() athleteId: string,
     @Param('eventId') eventId: string,
   ) {
-    const { rows: ev } = await this.db.q(
-      'SELECT results_status, protest_deadline FROM events WHERE id = $1',
-      [eventId],
-    );
-    if (!ev[0]) throw new NotFoundException('Event not found');
-    if (ev[0].results_status === 'none') {
-      // Nothing published, but the organiser may be serving a live RaceResult
-      // feed. Narrowed to this athlete by registration id, NOT by bib: a bib is
-      // unique within an event and an athlete could believe otherwise, but the
-      // registration id is the identity the roster resolved the bib to, and it
-      // is the only one that cannot hand somebody else's row to this caller.
-      const live = await this.live.liveRowsFor(eventId);
-      if (live) {
-        const { rows: mine } = await this.db.q(
-          `SELECT r.id AS registration_id FROM registrations r
-            WHERE r.event_id = $1 AND r.athlete_id = $2`,
-          [eventId, athleteId],
-        );
-        const ids = new Set(mine.map((m) => m.registration_id));
-        return {
-          results_status: 'live',
-          protest_deadline: null,
-          updated_at: live.fetched_at,
-          rows: live.rows.filter(
-            (r) => r.registration_id && ids.has(r.registration_id),
-          ),
-        };
-      }
-      return { results_status: 'none', rows: [] };
-    }
-
-    const { rows } = await this.db.q(
-      `SELECT ce.id AS entry_id, r.id AS registration_id, ce.bib, ce.race_status AS status, c.name AS category,
-              a.full_name, a.gender, a.city,
-              res.total_ms, res.overall_rank, res.gender_rank, res.age_group, res.age_group_rank,
-              -- How big the contest was. A bare "3rd" means nothing without it,
-              -- and it is the one thing the athlete loses by not being shown the
-              -- whole field — so it is counted here rather than inferred from a
-              -- list the page no longer has.
-              (SELECT count(*)::int FROM category_entries ce2
-                WHERE ce2.event_id = ce.event_id AND ce2.category_id = ce.category_id) AS field_size,
-              ${TEAM_COLUMNS}
-         FROM category_entries ce
-         JOIN registrations r ON r.id = ce.registration_id
-         JOIN athletes a ON a.id = r.athlete_id
-         LEFT JOIN categories c ON c.id = ce.category_id
-         LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE ce.event_id = $1 AND r.athlete_id = $2
-        ORDER BY c.name, ce.bib`,
+    // MY bibs at this event, from the map. This is the filter, and it is done
+    // against the roster rather than against anything in the feed: the bib is
+    // what the two sides share, and taking it from the athlete's own entries is
+    // what makes it impossible for this route to hand back somebody else's row.
+    const { rows: entries } = await this.db.q<{
+      entry_id: string;
+      bib: string;
+      category: string | null;
+      club: string | null;
+    }>(
+      `SELECT a.id AS entry_id, a.bib, a.category, a.club
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes a
+           ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+        WHERE me.id = $2 AND a.event_id = $1
+        ORDER BY a.category, a.bib`,
       [eventId, athleteId],
     );
+    if (!entries.length)
+      return { results_status: 'none', mine: [], rows: [], field: {} };
+
+    // The same payload the public board is built from, through the same
+    // service, so an athlete's own row and the row with their name on it in the
+    // leaderboard are literally the same object. `publicResults` honours the
+    // event's mode: the cache while it is live, the stored results once they
+    // are, and null when the organiser publishes neither.
+    const payload = await this.liveResults
+      .publicResults(eventId)
+      .catch(() => null);
+    if (!payload)
+      return {
+        results_status: 'none',
+        mine: entries.map((e) => ({ ...e, row: null })),
+        rows: [],
+        field: {},
+      };
+
+    const byEntry = new Map(
+      payload.rows.map((r) => [entryKey(r.bib, r.category), r]),
+    );
+
+    // How big each of my contests is. A bare "3rd" means nothing without it,
+    // and it is exactly what an athlete loses by being shown only their own
+    // row — so it is counted from the full payload here, on the server, rather
+    // than making the page download the whole field to work it out.
+    const field: Record<string, number> = {};
+    for (const r of payload.rows)
+      if (r.category) field[r.category] = (field[r.category] ?? 0) + 1;
 
     return {
-      results_status: ev[0].results_status,
-      protest_deadline: ev[0].protest_deadline,
-      rows,
+      results_status: payload.source === 'live' ? 'live' : 'final',
+      updated_at: payload.fetched_at,
+      event_name: payload.event_name,
+      // One per entry: an athlete holding three bibs at one event has three
+      // results, and showing the first would hide two races they ran.
+      mine: entries.map((e) => ({
+        ...e,
+        // Each entry finds ITS OWN row. Two contests under one bib are two
+        // races with two times, and both belong to this athlete.
+        row: byEntry.get(entryKey(e.bib, e.category)) ?? null,
+      })),
+      field,
+      // Deliberately empty. The leaderboard is a separate, unauthenticated read
+      // (GET /api/hyfit-judge/public/events/:id/results) that the page fetches
+      // only when somebody asks for it — an athlete opening their own result on
+      // venue wifi should not be made to download a thousand strangers first.
+      rows: [],
     };
   }
 
   /* GET /api/hyfitgames/me/stats — cross-edition performance */
   @Get('stats')
   async myStats(@HfgAthleteId() athleteId: string) {
+    // `editions` counts DISTINCT events, not entries: three categories at one
+    // event is one edition raced, and counting rows would tell an athlete they
+    // had done three.
     const { rows: agg } = await this.db.q(
-      `SELECT count(*) FILTER (WHERE ce.race_status = 'FIN')                    AS finishes,
-              count(DISTINCT e.id)                                             AS editions,
-              min(res.total_ms) FILTER (WHERE e.results_status = 'final')      AS pb_ms,
-              min(res.overall_rank) FILTER (WHERE e.results_status = 'final')  AS best_rank
-         FROM category_entries ce
-         JOIN registrations r ON r.id = ce.registration_id
-         JOIN events e ON e.id = ce.event_id
-         LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1`,
+      `SELECT count(*) FILTER (WHERE res.status = 'FIN')::int AS finishes,
+              count(DISTINCT a.event_id)::int                AS editions,
+              min(res.total_ms)                              AS pb_ms,
+              min(res.rank)                                  AS best_rank
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes a
+           ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+         JOIN hyfit_v2.events e ON e.id = a.event_id
+         LEFT JOIN hyfit_v2.results res
+                ON res.athlete_id = a.id AND e.results_mode = 'stored'
+        WHERE me.id = $1`,
       [athleteId],
     );
 
+    // The circuit, best leg by leg, straight off the stored columns. It used to
+    // come from `splits`/`stations`, which the field apps stopped writing when
+    // check-in and judging moved onto RaceResult (079) — these six pairs are
+    // where that data lives now.
     const { rows: stationBests } = await this.db.q(
-      `SELECT st.name, min(s.split_ms) AS best_ms
-         FROM splits s
-         JOIN stations st ON st.id = s.station_id
-         JOIN category_entries ce ON ce.id = s.entry_id
-         JOIN registrations r ON r.id = ce.registration_id
-        WHERE r.athlete_id = $1
-        GROUP BY st.name ORDER BY st.name`,
+      `SELECT label, min(ms) AS best_ms FROM (
+         SELECT unnest(ARRAY['Run 1','Station 1','Run 2','Station 2','Run 3','Station 3',
+                             'Run 4','Station 4','Run 5','Station 5','Run 6','Station 6']) AS label,
+                unnest(ARRAY[res.run1_ms, res.st1_ms, res.run2_ms, res.st2_ms,
+                             res.run3_ms, res.st3_ms, res.run4_ms, res.st4_ms,
+                             res.run5_ms, res.st5_ms, res.run6_ms, res.st6_ms]) AS ms,
+                unnest(ARRAY[1,2,3,4,5,6,7,8,9,10,11,12]) AS ord
+           FROM hyfit_v2.athletes me
+           JOIN hyfit_v2.athletes a
+             ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+            AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+           JOIN hyfit_v2.events e ON e.id = a.event_id AND e.results_mode = 'stored'
+           JOIN hyfit_v2.results res ON res.athlete_id = a.id
+          WHERE me.id = $1
+       ) legs
+        WHERE ms IS NOT NULL
+        GROUP BY label, ord ORDER BY ord`,
       [athleteId],
     );
 
     const { rows: progression } = await this.db.q(
-      `SELECT e.name, e.city, e.edition, e.event_date, res.total_ms, res.overall_rank
-         FROM category_entries ce
-         JOIN registrations r ON r.id = ce.registration_id
-         JOIN events e ON e.id = ce.event_id
-         JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1 AND e.results_status = 'final' AND res.total_ms IS NOT NULL
+      `SELECT e.name, e.venue AS city, e.event_date,
+              res.total_ms, res.rank AS overall_rank
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes a
+           ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+         JOIN hyfit_v2.events e ON e.id = a.event_id AND e.results_mode = 'stored'
+         JOIN hyfit_v2.results res ON res.athlete_id = a.id
+        WHERE me.id = $1 AND res.total_ms IS NOT NULL
         ORDER BY e.event_date`,
       [athleteId],
     );

@@ -13,8 +13,12 @@ type Config = {
     // The wristband -> BIB mapping table: its own Custom API, fetched whole.
     // Nothing about it is derived from the bib endpoint.
     mapLookupUrl: string;
+    // The standings feed. A third Custom API with a third key — results are not
+    // a view of the start list, they are their own API details in RaceResult.
+    resultsUrl: string;
     participantMapping: string;
     updateMapping: string;
+    resultsMapping: string;
     declarationText: string;
     // The check-in window, in minutes either side of the athlete's timeslot.
     // Empty close = the counter never closes for them.
@@ -53,19 +57,31 @@ const defaultConfig: Config = {
     participantApiUrl: "",
     updateApiUrl: "",
     mapLookupUrl: "",
+    resultsUrl: "",
     participantMapping: '{"listPath":"","bib":"Bib","name":"name","category":"Contest","contestId":"ContestID","gender":"Gender","dateOfBirth":"DateOfBirth","club":"Club","wave":"Wave","timeslot":"TimeSlot","contestDate":"ContestDate","mobile":"mobile"}',
+    // Empty on purpose. A standard HYFIT results export is alias-matched
+    // unaided (Bib, Name, Total, TeamTime, Run1..Run6, ST1..ST6, ST0COG,
+    // Rank, AgeGroupRank, Category, Club, Phone, Age, Status), and a mapping
+    // pre-filled with guesses would override the aliases with names this
+    // event's export may not have.
+    resultsMapping: "{}",
     // Every field the check-in and judge apps write back, spelled with the
     // names RaceResult uses by default. An organiser whose event names them
     // differently edits the value, never the key.
+    // Kept in the same order as `updateFieldDefaults` in
+    // `backend/src/hyfit-judge/hjudge-update-mapping.util.ts` — the backend
+    // is the source of truth, this is a seed for the textarea, and the two
+    // must list the same keys or a fresh event's pre-filled form silently
+    // omits whatever this copy falls behind on.
     updateMapping: JSON.stringify(
         {
             stage1checkin: "stage1checkin",
             stage1checkintime: "stage1checkintime",
             wristband: "wristbandID",
-            wristbandassignedby: "wristbandidAssignedBy",
             stage2checkin: "stage2checkin",
             stage2checkintime: "stage2checkintime",
             transponder1: "Transponder1",
+            wristbandassignedby: "wristbandidAssignedBy",
             transponderassignedby: "transponderAssignedBy",
             station1penalty: "station1penalty",
             station2penalty: "station2penalty",
@@ -73,6 +89,12 @@ const defaultConfig: Config = {
             station4penalty: "station4penalty",
             station5penalty: "station5penalty",
             station6penalty: "station6penalty",
+            station1note: "station1note",
+            station2note: "station2note",
+            station3note: "station3note",
+            station4note: "station4note",
+            station5note: "station5note",
+            station6note: "station6note",
             station1ics: "station1ics",
             station2ics: "station2ics",
             station3ics: "station3ics",
@@ -80,8 +102,11 @@ const defaultConfig: Config = {
             station5ics: "station5ics",
             station6ics: "station6ics",
             athletenotes: "athletenotes",
+            judgedby: "jugedby",
             cognitiveskillpenalty: "cognitiveskillpenalty",
             cognitiveskillbonus: "cognitiveskillbonus",
+            cognitivepattershown: "cognitivepattershown",
+            cognitiverecalled: "cognitiverecalled",
             cognitivememorisetime: "cognitivememorisetime",
             run1time: "run1time",
             station1time: "station1time",
@@ -115,6 +140,7 @@ const defaultConfig: Config = {
             cognitiverecalltod: "cognitiverecalltod",
             finishtod: "finishtod",
             status: "Status",
+            statusofathelet: "statusofathelet",
         },
         null,
         2,
@@ -153,8 +179,10 @@ export default function OperationsPage() {
                           participantApiUrl: configData.config.participantApiUrl,
                           updateApiUrl: configData.config.updateApiUrl,
                           mapLookupUrl: configData.config.mapLookupUrl ?? "",
+                          resultsUrl: configData.config.resultsUrl ?? "",
                           participantMapping: JSON.stringify(configData.config.participantMapping, null, 2),
                           updateMapping: JSON.stringify(configData.config.updateMapping, null, 2),
+                          resultsMapping: JSON.stringify(configData.config.resultsMapping ?? {}, null, 2),
                           declarationText: configData.config.declarationText ?? defaultDeclaration,
                           checkinWindowEnabled: configData.config.checkinWindowEnabled ?? false,
                           checkinOpensBeforeMinutes: configData.config.checkinOpensBeforeMinutes ?? 240,
@@ -200,8 +228,10 @@ export default function OperationsPage() {
                     participantApiUrl: config.participantApiUrl,
                     updateApiUrl: config.updateApiUrl,
                     mapLookupUrl: config.mapLookupUrl,
+                    resultsUrl: config.resultsUrl,
                     participantMapping: JSON.parse(config.participantMapping),
                     updateMapping: JSON.parse(config.updateMapping),
+                    resultsMapping: JSON.parse(config.resultsMapping || "{}"),
                     declarationText: config.declarationText,
                     checkinWindowEnabled: config.checkinWindowEnabled,
                     checkinOpensBeforeMinutes: config.checkinOpensBeforeMinutes,
@@ -291,37 +321,55 @@ export default function OperationsPage() {
                                 <span className="font-mono"> value</span> and <span className="font-mono">nohistory=0</span> themselves.
                             </p>
                         </div>
-                        <h3 className="mt-6 text-xs font-bold uppercase tracking-wider text-fog">Equipment Mapping · Required</h3>
+                        <div>
+                            <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-fog">Results fetch endpoint</label>
+                            <input
+                                value={config.resultsUrl}
+                                onChange={(e) => setConfig({ ...config, resultsUrl: e.target.value })}
+                                placeholder="https://<server>/_<eventID>/api/<CUSTOM_API_KEY>"
+                                className="w-full rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm outline-none focus:border-hyred"
+                            />
+                            <p className="mt-1 text-xs text-fog">
+                                A third Custom API, with a third key — the standings are their own API details in RaceResult and are
+                                not derived from the participant endpoint. Fetched whole, no query parameter. Leave it empty and this
+                                event publishes no results. Pull it from the event&apos;s{" "}
+                                <Link href={`/hyfitgames/admin/events/${eventId}/results`} className="font-bold text-chalk underline">
+                                    Results
+                                </Link>{" "}
+                                screen once it is saved.
+                            </p>
+                        </div>
+
+                        <h3 className="mt-6 text-xs font-bold uppercase tracking-wider text-fog">Wristband Mapping · Stage 2</h3>
                         <div className="space-y-3">
                             <div>
                                 <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-fog">
-                                    Equipment mapping endpoint
+                                    Wristband &rarr; BIB mapping endpoint
                                 </label>
                                 <input
                                     value={config.mapLookupUrl}
                                     onChange={(e) => setConfig({ ...config, mapLookupUrl: e.target.value })}
-                                    placeholder="Leave empty — no counter can check anyone in"
+                                    placeholder="Leave empty — Stage 2 counters cannot look anyone up"
                                     className="w-full rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm outline-none focus:border-hyred"
                                 />
                                 <p className="mt-1 text-xs text-fog">
-                                    A separate Custom API from the participant endpoint — paste the whole URL, it is not derived
-                                    from it. It is the counter&apos;s authority on equipment, and check-in cannot run without it: what a
-                                    BIB already holds is what decides whether that athlete is due a wristband or a transponder, and
-                                    who a scanned code belongs to is what stops the same band going to two people. It must carry a
-                                    BIB column and both asset columns.
+                                    A separate Custom API from the participant endpoint — paste the whole URL, it is not derived from
+                                    it. At Stage 2 the athlete presents the wristband issued at Stage 1, not a race number, so the
+                                    counter reads this table to turn the band into a BIB and then looks that BIB up in the participant
+                                    endpoint for everything else.
                                 </p>
                             </div>
                             {config.mapLookupUrl.trim() && (
                                 <div className="rounded-lg border border-smoke bg-coal px-3 py-2.5">
-                                    <p className="text-xs font-bold uppercase tracking-wider text-fog">What a counter will do</p>
+                                    <p className="text-xs font-bold uppercase tracking-wider text-fog">What a Stage 2 counter will do</p>
                                     <ol className="mt-1 space-y-0.5 text-xs text-fog">
                                         <li>
                                             1. <span className="break-all font-mono">{config.mapLookupUrl.trim()}</span> — fetched
-                                            whole, no query parameter: what this athlete holds, and who holds the scanned code
+                                            whole, no query parameter, and searched for the scanned band
                                         </li>
                                         <li>
                                             2. <span className="break-all font-mono">{config.participantApiUrl.trim() || "(participant endpoint)"}?bib=</span>
-                                            <span className="font-mono text-hyred">11651</span> — the athlete&apos;s name, contest and slot
+                                            <span className="font-mono text-hyred">11651</span> — the BIB it found, for the athlete&apos;s details
                                         </li>
                                     </ol>
                                 </div>
@@ -355,6 +403,29 @@ export default function OperationsPage() {
                                     name in a list is the one read back.
                                 </p>
                             </div>
+                        </div>
+
+                        <div className="mt-4">
+                            <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-fog">Results field mapping</label>
+                            <textarea
+                                rows={4}
+                                value={config.resultsMapping}
+                                onChange={(e) => setConfig({ ...config, resultsMapping: e.target.value })}
+                                className="w-full rounded-lg border border-smoke bg-coal px-3 py-2.5 font-mono text-xs outline-none focus:border-hyred"
+                            />
+                            <p className="mt-1 text-xs text-fog">
+                                Usually left as <code>{"{}"}</code>. A standard HYFIT export is matched by name unaided —{" "}
+                                <span className="font-mono">Bib</span>, <span className="font-mono">Name</span>,{" "}
+                                <span className="font-mono">Total</span>, <span className="font-mono">TeamTime</span>,{" "}
+                                <span className="font-mono">Run1…Run6</span>, <span className="font-mono">ST1…ST6</span>,{" "}
+                                <span className="font-mono">ST0COG</span>, <span className="font-mono">Rank</span>,{" "}
+                                <span className="font-mono">AgeGroupRank</span>, <span className="font-mono">Category</span>,{" "}
+                                <span className="font-mono">Club</span>, <span className="font-mono">Phone</span>,{" "}
+                                <span className="font-mono">Age</span>, <span className="font-mono">Status</span>. Override one only
+                                when this event names it differently: <code>{'{"bib":"StartNo"}'}</code>. A name that is not in the
+                                payload falls back to the defaults rather than blanking the column. Penalty and bonus columns are
+                                picked up by pattern and need no mapping.
+                            </p>
                         </div>
 
                         <h3 className="mt-6 text-xs font-bold uppercase tracking-wider text-fog">Check-in Window</h3>

@@ -1016,7 +1016,8 @@ export class HfgSetupService {
         `INSERT INTO hyfit_v2.raceresults_endpoints (
            event_id, version, state, bib_lookup_url, update_url,
            map_lookup_url, map_lookup_param, map_lookup_key,
-           participant_mapping, update_mapping,
+           results_url,
+           participant_mapping, update_mapping, results_mapping,
            declaration_text, declaration_version,
            checkin_window_enabled, checkin_opens_before_minutes,
            checkin_closes_after_minutes, published_at, published_by)
@@ -1024,7 +1025,8 @@ export class HfgSetupService {
                  COALESCE((SELECT max(version) FROM hyfit_v2.raceresults_endpoints WHERE event_id = $1), 0) + 1,
                  'published', $2, COALESCE($3,''),
                  COALESCE($4,''), COALESCE($5,''), COALESCE($6,'transponder'),
-                 $7::jsonb, COALESCE($8::jsonb,'{}'::jsonb),
+                 COALESCE($15,''),
+                 $7::jsonb, COALESCE($8::jsonb,'{}'::jsonb), COALESCE($16::jsonb,'{}'::jsonb),
                  COALESCE($9, 'I confirm that my participant details are correct and that I have received the assigned race equipment.'),
                  COALESCE($10, 1), COALESCE($11, false), COALESCE($12, 240), $13,
                  now(),
@@ -1047,6 +1049,10 @@ export class HfgSetupService {
           p.checkin_opens_before_minutes ?? null,
           p.checkin_closes_after_minutes ?? null,
           adminId,
+          // Carried forward like the rest: setting a roster URL here must not
+          // retire the standings endpoint somebody published on Operations.
+          p.results_url ?? null,
+          p.results_mapping ? JSON.stringify(p.results_mapping) : null,
         ],
       );
     });
