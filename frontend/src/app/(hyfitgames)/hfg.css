@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+/* HYFIT Games design tokens (ported from the module's tailwind.config.js).
+   Registering them via @theme makes bg-hyred / text-fog / bg-coal /
+   border-smoke / bg-ink etc. available on the HYFIT Games routes. */
+@theme {
+  --color-hyred: #88021b;
+
+  /* The brand red doing a second job: as INK rather than as a fill.
+   *
+   * #88021b is a deep maroon. It is 9.9:1 on the light canvas but only
+   * 1.85:1 on the dark one — and 1.65:1 on the tinted `bg-hyred/15` the
+   * active nav item uses, which is near-invisible. A fill and a label pull in
+   * opposite directions on a dark page, so they get separate tokens; this is
+   * the same split the judge app makes between --field-forest and
+   * --field-forest-ink, for the same reason.
+   *
+   * In light mode it collapses back to the exact brand red, so nothing there
+   * changes. */
+  --color-hyred-ink: #e05a70;
+
+  --color-ink: #121212;
+  --color-coal: #1c1c1c;
+  --color-smoke: #333333;
+  --color-fog: #9a9a96;
+
+  /* Primary text. Previously the literal `text-white`, which cannot follow a
+     theme — this token can. */
+  --color-chalk: #ffffff;
+
+  /* Text on a filled brand or status surface. Identical in both themes: those
+     fills stay dark whichever theme is active, so their label must stay light.
+     Kept separate from chalk, which flips. */
+  --color-onfill: #ffffff;
+
+  /* Status colours, previously raw Tailwind palette classes (emerald-300 on
+     emerald-900/40 and friends). Those are picked for a dark surface and go
+     muddy on a light one, so they are tokens now: `-soft` is the wash behind
+     the text, `-fill` is a solid button that always carries chalk text. */
+  --color-good: #6ee7a8;
+  --color-good-soft: #0e2f20;
+  --color-good-fill: #047857;
+  --color-warn: #fbbf24;
+  --color-warn-soft: #3a2a0c;
+  --color-warn-fill: #b45309;
+  --color-bad: #fca5a5;
+  --color-bad-soft: #3a1416;
+
+  /* The unfilled arc of a progress ring, and the teal accent on the
+     "faster than" ring. Both were literals in my-stats; a literal cannot
+     follow a theme, and #333 on a white card is a heavy black hoop. */
+  --color-track: #333333;
+  --color-teal: #0f766e;
+}
+
+/* Light theme for the whole HYFIT Games solution.
+ *
+ * Scoped to `.hfg-root`, which is the <body> wrapper every /hyfitgames route
+ * renders inside — the athlete app, the login screens and the admin console
+ * alike. Custom properties inherit, so redefining them here re-resolves every
+ * `bg-coal` / `text-fog` / `text-chalk` utility in the tree without touching a
+ * single utility class.
+ *
+ * (This was previously scoped to `.hfg-admin`, back when only the console had
+ * a toggle. The athlete pages were dark-only, so their literals — text-white,
+ * amber-400, emerald-300, #333 — could not follow anything; those are tokens
+ * now, which is what let the scope widen.)
+ *
+ * hyred is deliberately absent: the brand red is 9.9:1 on the light canvas and
+ * 5.4:1 on the dark one, so it carries across unchanged. So is onfill — a
+ * filled brand or status surface stays dark in both themes, so its label stays
+ * light. */
+:root[data-hfg-theme="light"] .hfg-root {
+  --color-ink: #f3f3f1;
+  --color-coal: #ffffff;
+  --color-smoke: #d8d8d2;
+  /* A shade darker than the obvious #61615c: fog is also the label colour on a
+     `bg-smoke` chip, where #61615c lands at 4.35:1 — just under AA. This clears
+     it at 4.77:1 without visibly changing anything on the white cards. */
+  --color-fog: #5b5b56;
+  --color-chalk: #16161a;
+
+  /* Back to the true brand red: on a light canvas it needs no help. */
+  --color-hyred-ink: #88021b;
+
+  --color-good: #10673d;
+  --color-good-soft: #dcf3e5;
+  --color-good-fill: #047857;
+  --color-warn: #8a5806;
+  --color-warn-soft: #fbeed3;
+  --color-warn-fill: #b45309;
+  --color-bad: #a32621;
+  --color-bad-soft: #fae3e1;
+
+  --color-track: #e2e2dd;
+  --color-teal: #0d6d64;
+}
+
+/* Scoped base styles (the module's index.css applied these to <body>). Kept
+   under the .hfg-root wrapper so they never leak into the rest of Novarace. */
+.hfg-root {
+  -webkit-tap-highlight-color: transparent;
+  background-color: var(--color-ink);
+  /* Was the literal #ffffff, which pinned every unstyled text node to white
+     and left it invisible the moment the canvas went light. */
+  color: var(--color-chalk);
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A native <select> popup, scrollbar or date picker is painted by the OS, not
+   the page, so it needs `color-scheme` to be told which way to go.
+ *
+ * Scoped to the athlete app and the console rather than to `.hfg-root`, which
+ * is the shared <body>: the judge app renders inside that same body but is a
+ * separate design system with the opposite default (light, for daylight) and
+ * its own `html { color-scheme: var(--field-color-scheme) }` in tablet.css.
+ * A declaration on the body sits below that html rule in the inheritance
+ * chain and wins for everything inside it, so scoping to `.hfg-root` here
+ * silently forced the judge tablets to the wrong scheme. */
+.hfg-app,
+.hfg-admin { color-scheme: dark; }
+
+:root[data-hfg-theme="light"] .hfg-app,
+:root[data-hfg-theme="light"] .hfg-admin { color-scheme: light; }
+
+.hfg-root input,
+.hfg-root select,
+.hfg-root textarea {
+  font-size: 16px; /* prevent iOS zoom on focus */
+}

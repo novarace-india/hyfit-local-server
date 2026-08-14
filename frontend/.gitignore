@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.env.local
+tsconfig.tsbuildinfo
+
+# Sideloaded app builds dropped into public/apps/{judge,checkin} for the
+# venue download page. Installers are release artefacts, not source.
+public/apps/*/*.apk

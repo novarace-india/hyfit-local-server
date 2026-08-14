@@ -1,0 +1,2797 @@
+/* Tablet-first production UI for HYFIT field operations. Loaded last on purpose. */
+:root {
+  --field-canvas: #eef1ed;
+  --field-surface: #ffffff;
+  --field-surface-soft: #f7f9f6;
+  --field-surface-strong: #e2e8e1;
+  --field-forest: #1f3325;
+  --field-forest-hover: #294632;
+  --field-ink: #172019;
+  --field-muted: #5e6a62;
+  --field-faint: #7c877f;
+  --field-line: #ccd3cc;
+  --field-line-strong: #aeb9b0;
+  --field-lime: #b8f238;
+  --field-success: #2f7a43;
+  --field-success-soft: #e4f1e7;
+  --field-warning: #a76714;
+  --field-warning-soft: #fff2db;
+  --field-danger: #a93632;
+  --field-danger-soft: #fbe8e6;
+  --field-blue: #256b8e;
+  --field-blue-soft: #e3f1f7;
+  --field-shadow: 0 10px 30px rgb(26 42 30 / 8%);
+  --field-shadow-raised: 0 18px 50px rgb(26 42 30 / 14%);
+  --field-font:
+    Roboto, "Segoe UI", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  --field-numeric:
+    "Roboto Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+
+  --ink: var(--field-ink);
+  --muted: var(--field-muted);
+  --panel: var(--field-surface);
+  --line: var(--field-line);
+  --lime: var(--field-lime);
+  --brand: var(--field-forest);
+  --brand-bright: var(--field-forest);
+  --danger: var(--field-danger);
+  --ops-bg: var(--field-canvas);
+  --ops-panel: var(--field-surface);
+  --ops-raised: var(--field-surface-soft);
+  --ops-line: var(--field-line);
+  --ops-text: var(--field-ink);
+  --ops-muted: var(--field-muted);
+  --ops-lime: var(--field-lime);
+  --ops-red: var(--field-danger);
+  --ops-good: var(--field-success);
+  --ops-warn: var(--field-warning);
+  --hyfit-interface: var(--field-font);
+  --hyfit-numeric: var(--field-numeric);
+}
+
+html {
+  color-scheme: var(--field-color-scheme);
+}
+
+/* Layout-neutral everywhere except the phone breakpoint below. */
+.mobile-action-dock {
+  display: contents;
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font-family: var(--field-font);
+}
+
+body {
+  background: var(--field-canvas);
+  color: var(--field-ink);
+}
+
+button,
+input,
+select,
+textarea {
+  font-size: 16px;
+}
+
+button {
+  min-height: 56px;
+}
+
+small {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--field-blue);
+  outline-offset: 3px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.eyebrow,
+.card-kicker,
+.station-number,
+.timing-stage-kicker,
+.ops-kicker,
+.stage-rail>span,
+.brand b,
+.ops-brand b {
+  color: var(--field-muted);
+  font-family: var(--field-font);
+  font-size: 14px;
+  font-style: normal;
+  font-stretch: normal;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+/* Shared top-level shell */
+.app-shell,
+.ops-login,
+.ops-shell,
+.checkin-shell {
+  background: var(--field-canvas);
+  color: var(--field-ink);
+  min-height: 100dvh;
+}
+
+.topbar,
+.checkin-shell>header {
+  background: var(--field-surface);
+  border-bottom: 1px solid var(--field-line);
+  box-shadow: 0 2px 12px rgb(26 42 30 / 6%);
+  color: var(--field-ink);
+  height: 64px;
+  padding: 0 24px;
+}
+
+.topbar::after {
+  display: none;
+}
+
+.brand {
+  color: var(--field-ink);
+  gap: 10px;
+}
+
+.brand-logo {
+  filter: var(--field-logo-filter);
+  height: 48px;
+  width: 64px;
+}
+
+.brand b {
+  color: var(--field-ink);
+  font-size: 16px;
+  letter-spacing: 0.03em;
+}
+
+.brand small {
+  color: var(--field-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  opacity: 1;
+}
+
+.sync-pill,
+.ops-live {
+  background: var(--field-success-soft);
+  border: 1px solid var(--field-line-success);
+  color: var(--field-success);
+  font-size: 14px;
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+.sync-pill.offline {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+  color: var(--field-warning);
+}
+
+.pulse,
+.live-dot {
+  background: var(--field-success);
+  box-shadow: none;
+  height: 8px;
+  width: 8px;
+}
+
+.amber-dot {
+  background: var(--field-warning);
+  box-shadow: none;
+  height: 8px;
+  width: 8px;
+}
+
+.icon-btn {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line-strong);
+  border-radius: 10px;
+  color: var(--field-ink);
+  font-size: 18px;
+  height: 48px;
+  min-height: 48px;
+  width: 48px;
+}
+
+.workspace {
+  grid-template-columns: 192px minmax(0, 1fr);
+  min-height: calc(100dvh - 64px);
+}
+
+.workspace>aside {
+  background: var(--field-tint-rail);
+  border-right: 1px solid var(--field-line);
+  padding: 18px 12px;
+}
+
+.judge-chip {
+  border-bottom-color: var(--field-line);
+  gap: 10px;
+  padding: 0 6px 18px;
+}
+
+.judge-chip>span,
+.avatar {
+  background: var(--field-forest);
+  border: 0;
+  border-radius: 9px;
+  color: #fff;
+  font-size: 14px;
+  height: 44px;
+  width: 44px;
+}
+
+.judge-chip b {
+  color: var(--field-ink);
+  font-size: 15px;
+}
+
+.judge-chip small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.workspace nav {
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.workspace nav button {
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--field-muted);
+  font-size: 15px;
+  gap: 10px;
+  min-height: 56px;
+  padding: 12px;
+}
+
+.workspace nav button.active {
+  background: var(--field-forest);
+  color: #fff;
+}
+
+.workspace nav i {
+  background: rgb(255 255 255 / 18%);
+  font-size: 12px;
+  padding: 3px 7px;
+}
+
+.side-status {
+  border-top-color: var(--field-line);
+  padding: 14px 8px;
+}
+
+.side-status b {
+  color: var(--field-ink);
+  font-size: 13px;
+}
+
+.side-status small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.content {
+  margin: 0 auto;
+  max-width: 1440px;
+  padding: 24px 28px 104px;
+}
+
+.page-heading {
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.page-heading h2,
+.race-header h2 {
+  color: var(--field-ink);
+  font-size: 28px;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  margin: 6px 0 3px;
+}
+
+.page-heading p {
+  color: var(--field-muted);
+  font-size: 16px;
+  line-height: 1.45;
+  margin: 6px 0 0;
+}
+
+.clock {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 28px;
+}
+
+.clock small {
+  color: var(--field-muted);
+  font-family: var(--field-font);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+/* Shared controls and surfaces */
+.primary,
+.stage-primary,
+.ops-primary,
+.timing-primary {
+  background: var(--field-forest);
+  border: 1px solid var(--field-forest);
+  border-radius: 10px;
+  box-shadow: none;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 800;
+  min-height: 64px;
+  padding: 16px 20px;
+}
+
+.primary:hover,
+.stage-primary:hover,
+.ops-primary:hover,
+.timing-primary:hover {
+  background: var(--field-forest-hover);
+}
+
+.primary:disabled,
+.stage-primary:disabled,
+.ops-primary:disabled,
+.timing-primary:disabled {
+  background: var(--field-surface-strong);
+  border-color: var(--field-line);
+  color: var(--field-faint);
+}
+
+.secondary,
+.text-btn,
+.back,
+.checkin-reset,
+.help-desk-action {
+  color: var(--field-forest-ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.back {
+  margin-bottom: 18px;
+  min-height: 44px;
+  padding: 0 8px;
+}
+
+input,
+select,
+textarea,
+.field,
+.search-box {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--field-faint);
+}
+
+.field,
+.search-box {
+  border-radius: 10px;
+  height: 58px;
+}
+
+.field input,
+.search-box input {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.field:focus-within,
+.search-box:focus-within {
+  border-color: var(--field-forest);
+  box-shadow: 0 0 0 3px rgb(31 51 37 / 12%);
+}
+
+.event-card,
+.verify-card,
+.station-card,
+.standard-card,
+.result-card,
+.history-detail,
+.comparison-panel,
+.ops-panel,
+.ops-grid>article,
+.identity-card,
+.team-card,
+.prior-stage-card,
+.declaration-card,
+.evidence-card,
+.already-done,
+.stage-blocked,
+.timing-stage-card,
+.timing-splits-panel {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 12px;
+  box-shadow: var(--field-shadow);
+  color: var(--field-ink);
+}
+
+/* Judge login */
+.login-grid {
+  gap: clamp(36px, 7vw, 96px);
+  grid-template-columns: minmax(0, 0.85fr) minmax(420px, 0.65fr);
+  min-height: calc(100dvh - 64px);
+  padding: 36px 56px;
+}
+
+.login-grid::before {
+  display: none;
+}
+
+.login-copy h1 {
+  color: var(--field-ink);
+  font-family: var(--field-font);
+  font-size: clamp(44px, 5vw, 64px);
+  font-style: normal;
+  font-weight: 850;
+  letter-spacing: -0.045em;
+  line-height: 0.98;
+  margin: 20px 0 22px;
+  text-transform: none;
+  text-shadow: none;
+}
+
+.login-copy h1 em {
+  color: var(--field-success);
+  font-style: normal;
+}
+
+.login-copy>p {
+  color: var(--field-muted);
+  font-size: 18px;
+  line-height: 1.55;
+}
+
+.trust-row {
+  color: var(--field-muted);
+  font-size: 14px;
+  gap: 20px;
+  margin-top: 28px;
+}
+
+.trust-row span:first-child {
+  color: var(--field-success);
+}
+
+.login-card {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 16px;
+  box-shadow: var(--field-shadow-raised);
+  padding: 32px;
+}
+
+.login-card h2 {
+  color: var(--field-ink);
+  font-size: 28px;
+  letter-spacing: -0.02em;
+  margin: 8px 0;
+}
+
+.login-card>p {
+  color: var(--field-muted);
+  font-size: 16px;
+  margin-bottom: 24px;
+}
+
+.login-card label,
+.custom-penalty label {
+  color: var(--field-muted);
+  font-size: 14px;
+  letter-spacing: 0.03em;
+}
+
+.demo-note {
+  color: var(--field-faint);
+  font-size: 12px;
+}
+
+/* Event and participant selection */
+.event-grid {
+  gap: 16px;
+}
+
+.event-card {
+  color: var(--field-ink);
+  padding: 22px;
+}
+
+.event-card::before {
+  border-color: var(--field-line);
+  opacity: 0.55;
+}
+
+.event-card.featured:hover {
+  border-color: var(--field-forest);
+  transform: none;
+}
+
+.event-top>span {
+  background: var(--field-success);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.event-top i {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.event-logo {
+  filter: var(--field-logo-filter);
+  height: 82px;
+  margin: 10px 0 0;
+  width: 96px;
+}
+
+.event-card h3 {
+  font-size: 22px;
+  margin: 12px 0 5px;
+}
+
+.event-card p {
+  color: var(--field-muted);
+  font-size: 15px;
+}
+
+.event-stats {
+  border-top-color: var(--field-line);
+  margin-top: 16px;
+  padding-top: 14px;
+}
+
+.event-stats span {
+  color: var(--field-muted);
+  font-size: 13px;
+}
+
+.event-stats b {
+  color: var(--field-ink);
+  font-size: 20px;
+}
+
+.event-cta {
+  background: var(--field-tint-panel);
+  color: var(--field-forest-ink);
+  font-size: 16px;
+  margin: 18px -22px -22px;
+  padding: 16px 22px;
+}
+
+.brief-strip {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  font-size: 14px;
+  min-height: 64px;
+}
+
+.brief-strip span {
+  color: var(--field-muted);
+}
+
+.brief-strip button {
+  color: var(--field-forest-ink);
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.assignment {
+  border-left-color: var(--field-line);
+}
+
+.assignment b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.assignment span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.participant-search-actions {
+  grid-template-columns: minmax(0, 1fr) 220px;
+}
+
+.search-box {
+  height: 64px;
+}
+
+.search-box kbd {
+  display: none;
+}
+
+.scan-qr-btn {
+  background: var(--field-forest);
+  border: 1px solid var(--field-forest);
+  border-radius: 10px;
+  color: #fff;
+  height: 64px;
+  min-height: 64px;
+}
+
+.scan-qr-btn b {
+  font-size: 16px;
+}
+
+.scan-qr-btn small {
+  color: var(--field-on-fill-soft);
+  font-size: 12px;
+}
+
+.scan-qr-btn:hover {
+  background: var(--field-forest-hover);
+  border-color: var(--field-forest-hover);
+}
+
+.participant-sync {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+  border-radius: 10px;
+  min-height: 64px;
+  padding: 10px 14px;
+}
+
+.participant-sync.stale {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+}
+
+.participant-sync b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.participant-sync small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.participant-sync button {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-forest-ink);
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.result-head {
+  color: var(--field-muted);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+.result-head small {
+  font-size: 12px;
+}
+
+.athlete-list {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  border-radius: 12px;
+}
+
+.athlete-row {
+  background: var(--field-surface);
+  border-bottom-color: var(--field-line);
+  color: var(--field-ink);
+  min-height: 76px;
+  padding: 12px 16px;
+}
+
+.athlete-row:hover {
+  background: var(--field-surface-soft);
+}
+
+.athlete-main b {
+  font-size: 16px;
+}
+
+.athlete-main small {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.bib {
+  font-family: var(--field-numeric);
+  font-size: 18px;
+}
+
+.status {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+  color: var(--field-success);
+  font-size: 12px;
+  padding: 6px 9px;
+}
+
+.status.busy {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+  color: var(--field-warning);
+}
+
+.status.mine {
+  background: var(--field-blue-soft);
+  border-color: var(--field-line-blue);
+  color: var(--field-blue-ink);
+}
+
+.status.done {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line);
+  color: var(--field-muted);
+}
+
+.athlete-row:has(.status.done) {
+  opacity: 0.72;
+}
+
+.fallback {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.fallback button {
+  color: var(--field-forest-ink);
+  font-size: 14px;
+  min-height: 44px;
+}
+
+/* Verification and legacy judge panels */
+.focus-wrap,
+.sequence-screen,
+.recall-wrap,
+.finish-wrap {
+  max-width: 900px;
+}
+
+.verify-card {
+  padding: 24px;
+}
+
+.verify-top h2 {
+  color: var(--field-ink);
+  font-size: 28px;
+}
+
+.verify-top p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.avatar.large {
+  height: 64px;
+  width: 64px;
+}
+
+.big-bib {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 32px;
+}
+
+.big-bib small {
+  color: var(--field-muted);
+  font-family: var(--field-font);
+  font-size: 12px;
+}
+
+.checks {
+  margin: 20px 0;
+}
+
+.checks span {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+  color: var(--field-success);
+  font-size: 14px;
+  min-height: 56px;
+  padding: 14px;
+}
+
+.warning {
+  background: var(--field-warning-soft);
+  border-left-color: var(--field-warning);
+}
+
+.warning b {
+  font-size: 15px;
+}
+
+.warning span {
+  color: var(--field-warning-ink);
+  font-size: 14px;
+}
+
+.doubles-verify {
+  border-color: var(--field-line);
+  box-shadow: inset 0 4px 0 var(--field-lime);
+}
+
+.partner-lane {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line-strong);
+}
+
+.partner-lane.confirmed {
+  background: var(--field-success-soft);
+  border-color: var(--field-success);
+}
+
+.partner-lane small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.partner-lane b {
+  color: var(--field-ink);
+  font-size: 20px;
+}
+
+.partner-lane span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.team-clock-rule {
+  background: var(--field-tint-panel);
+  border-left-color: var(--field-forest);
+}
+
+.team-clock-rule b {
+  font-size: 16px;
+}
+
+.team-clock-rule span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+/* Timing console: the primary handheld instrument */
+.content:has(.timing-console) {
+  max-width: none;
+  padding: 16px 20px 104px;
+}
+
+.timing-console {
+  --timing-blue: var(--field-blue);
+  --timing-amber: var(--field-warning);
+  --timing-red: var(--field-danger);
+  color: var(--field-ink);
+  max-width: 1500px;
+}
+
+.timing-athlete-rail {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 11px;
+  box-shadow: var(--field-shadow);
+  gap: 16px;
+  padding: 12px 16px;
+  top: 72px;
+}
+
+.timing-athlete-rail small,
+.timing-stage-kicker span,
+.timing-panel-heading small,
+.timing-final-time small,
+.timing-cognitive-result small {
+  color: var(--field-muted);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+}
+
+.timing-athlete-rail strong {
+  color: var(--field-ink);
+  font-size: 20px;
+}
+
+.timing-athlete-rail>div>span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.timing-bib {
+  border-color: var(--field-line);
+  padding: 0 22px;
+}
+
+.timing-bib b {
+  color: var(--field-forest-ink);
+  font-family: var(--field-numeric);
+  font-size: 34px;
+}
+
+.timing-clock b {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 38px;
+}
+
+.timing-clock span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.timing-ooc {
+  background: var(--field-danger-soft);
+  border-color: var(--field-line-danger);
+  color: var(--field-danger);
+}
+
+.timing-ooc b {
+  font-size: 16px;
+}
+
+.timing-ooc span {
+  font-size: 14px;
+}
+
+.timing-course-strip {
+  margin: 12px 2px;
+}
+
+.timing-course-strip span {
+  background: var(--field-track);
+  height: 7px;
+}
+
+.timing-course-strip .done {
+  background: var(--field-track-done);
+}
+
+.timing-course-strip .active {
+  background: var(--field-lime);
+  box-shadow: 0 0 0 2px var(--field-lime-ring);
+}
+
+.timing-layout {
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 290px;
+}
+
+.timing-stage-card {
+  padding: 24px;
+}
+
+.timing-stage-kicker b {
+  color: var(--field-blue);
+  font-family: var(--field-numeric);
+  font-size: 22px;
+}
+
+.timing-stage-card>h1 {
+  color: var(--field-ink);
+  font-size: clamp(32px, 3.4vw, 44px);
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  margin: 10px 0 8px;
+}
+
+.timing-stage-card>p {
+  color: var(--field-muted);
+  font-size: 16px;
+  line-height: 1.45;
+  margin-bottom: 18px;
+}
+
+.timing-primary {
+  align-items: center;
+  background: var(--field-forest);
+  border: 1px solid var(--field-forest);
+  bottom: 10px;
+  box-shadow: 0 8px 24px rgb(31 51 37 / 20%);
+  min-height: 76px;
+  position: sticky;
+  z-index: 7;
+}
+
+.timing-primary span {
+  font-size: 20px;
+}
+
+.timing-primary small {
+  color: var(--field-on-fill-soft);
+  font-size: 12px;
+  opacity: 1;
+}
+
+.timing-primary.danger {
+  background: var(--field-danger);
+  border-color: var(--field-danger);
+  color: #fff;
+}
+
+.timing-finish {
+  background: var(--field-blue);
+  border-color: var(--field-blue);
+}
+
+.timing-sequence {
+  gap: 8px;
+  margin: 18px 0;
+}
+
+.timing-sequence>div {
+  border: 2px solid rgb(23 32 25 / 18%);
+  border-radius: 9px;
+}
+
+.timing-sequence small {
+  font-size: 12px;
+}
+
+.timing-sequence b {
+  font-size: clamp(26px, 3vw, 40px);
+}
+
+.timing-callout {
+  background: var(--field-blue-soft);
+  border-left-color: var(--field-blue);
+  color: var(--field-blue-ink);
+  font-size: 14px;
+  margin: 14px 0;
+  padding: 12px 14px;
+}
+
+.timing-outcomes {
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.timing-outcomes>label:not(.timing-note) {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line-strong);
+  border-radius: 10px;
+  min-height: 76px;
+  padding: 14px 16px;
+}
+
+.timing-outcomes label b {
+  color: var(--field-ink);
+  font-size: 18px;
+}
+
+.timing-outcomes label span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.timing-outcomes>label.selected {
+  background: var(--field-success-soft);
+  border-color: var(--field-success);
+  box-shadow: inset 0 0 0 1px var(--field-success);
+}
+
+.timing-outcomes>label.penalty.selected {
+  background: var(--field-warning-soft);
+  border-color: var(--field-warning);
+}
+
+.timing-outcomes>label.ics.selected {
+  background: var(--field-danger-soft);
+  border-color: var(--field-danger);
+}
+
+.timing-note>span {
+  color: var(--field-ink) !important;
+  font-size: 14px !important;
+}
+
+.timing-note textarea {
+  background: var(--field-surface);
+  border-color: var(--field-line-danger);
+  color: var(--field-ink);
+  min-height: 88px;
+}
+
+.timing-action-error {
+  background: var(--field-danger-soft);
+  border-color: var(--field-line-danger);
+  color: var(--field-danger);
+  font-size: 14px;
+}
+
+.timing-recall-progress span {
+  border-color: var(--field-line-strong);
+  color: var(--field-muted);
+  font-size: 14px;
+  height: 48px;
+}
+
+.timing-colour-buttons {
+  gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  min-height: 250px;
+}
+
+.timing-colour-buttons button {
+  border: 3px solid rgb(23 32 25 / 12%);
+  border-radius: 12px;
+  min-height: 220px;
+}
+
+.timing-colour-buttons b {
+  font-size: clamp(30px, 4vw, 46px);
+}
+
+.timing-colour-buttons span {
+  font-size: 14px;
+}
+
+.timing-reset {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-forest-ink);
+  font-size: 16px;
+}
+
+.timing-recall-review>b {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.timing-review-row>span {
+  border-radius: 8px;
+  height: 48px;
+}
+
+.timing-review-row>span>b {
+  font-size: 16px;
+}
+
+.timing-cognitive-result>div {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line);
+}
+
+.timing-cognitive-result b {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 24px;
+}
+
+.timing-panel-heading {
+  border-bottom-color: var(--field-line);
+  padding: 16px;
+}
+
+.timing-panel-heading b {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.timing-panel-heading>span {
+  background: var(--field-forest);
+  color: #fff;
+}
+
+.timing-split-list {
+  max-height: 390px;
+}
+
+.timing-split-list>div {
+  border-bottom-color: var(--field-line);
+  padding: 13px 15px;
+}
+
+.timing-split-list b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.timing-split-list small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.timing-split-list strong {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 15px;
+}
+
+.timing-split-list>p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.timing-sync-note {
+  background: var(--field-tint-panel);
+}
+
+.timing-sync-note>span {
+  color: var(--field-success);
+}
+
+.timing-sync-note b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.timing-sync-note small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.timing-complete-mark {
+  background: var(--field-success);
+  color: #fff;
+}
+
+.timing-complete h2 {
+  color: var(--field-ink);
+  font-size: 28px;
+}
+
+.timing-complete>p {
+  color: var(--field-muted);
+  font-size: 16px;
+}
+
+.timing-final-time {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+}
+
+.timing-final-time b {
+  color: var(--field-forest-ink);
+  font-family: var(--field-numeric);
+  font-size: 44px;
+}
+
+.timing-delivery-state {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+}
+
+.timing-delivery-state.pending {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+}
+
+.timing-delivery-state.attention {
+  background: var(--field-danger-soft);
+  border-color: var(--field-line-danger);
+}
+
+.timing-delivery-state b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.timing-delivery-state span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.timing-loading,
+.timing-error {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  color: var(--field-ink);
+}
+
+.timing-loading b,
+.timing-error b {
+  font-size: 22px;
+}
+
+.timing-loading span,
+.timing-error span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+/* Shared overlays */
+.modal-backdrop {
+  background: rgb(20 31 23 / 55%);
+  backdrop-filter: blur(4px);
+}
+
+.help-modal,
+.qr-modal {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  border-radius: 14px;
+  box-shadow: var(--field-shadow-raised);
+  color: var(--field-ink);
+}
+
+.modal-close {
+  color: var(--field-muted);
+  font-size: 28px;
+  height: 48px;
+  min-height: 48px;
+  width: 48px;
+}
+
+.help-icon,
+.qr-icon {
+  background: var(--field-warning-soft);
+  color: var(--field-warning);
+}
+
+.help-modal h3,
+.qr-heading h3 {
+  color: var(--field-ink);
+  font-size: 22px;
+}
+
+.help-modal p {
+  color: var(--field-muted);
+  font-size: 16px;
+}
+
+.help-options button {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line);
+  color: var(--field-ink);
+  font-size: 15px;
+  min-height: 58px;
+}
+
+.help-options span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.help-modal>small {
+  border-top-color: var(--field-line);
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.qr-icon {
+  background: var(--field-tint-panel);
+  border-color: var(--field-line-success);
+  color: var(--field-forest-ink);
+}
+
+.qr-camera {
+  background: var(--field-camera-well);
+  border-color: var(--field-line-strong);
+  border-radius: 12px;
+}
+
+.qr-frame i {
+  border-color: var(--field-lime);
+}
+
+.qr-camera::after {
+  background: var(--field-lime);
+  box-shadow: 0 0 12px var(--field-lime);
+}
+
+.qr-message {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.qr-message.error {
+  color: var(--field-danger);
+}
+
+.qr-manual {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-forest-ink);
+  font-size: 16px;
+  min-height: 56px;
+}
+
+.qr-modal>small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.toast {
+  background: var(--field-forest);
+  color: #fff;
+  font-size: 14px;
+}
+
+/* Check-in */
+.ops-login {
+  background: var(--field-canvas);
+}
+
+.ops-login-card {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 16px;
+  box-shadow: var(--field-shadow-raised);
+  color: var(--field-ink);
+  padding: 30px;
+}
+
+.checkin-login .ops-login-card,
+.admin-login .ops-login-card {
+  border-top: 1px solid var(--field-line);
+}
+
+.ops-login-card>img {
+  filter: var(--field-logo-filter);
+}
+
+.ops-login-card h1 {
+  color: var(--field-ink);
+  font-size: 28px;
+}
+
+.ops-login-card input,
+.ops-login-card select {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+  min-height: 56px;
+}
+
+.ops-login-card button,
+.ops-login-card>button:not(:disabled):hover {
+  background: var(--field-forest);
+  border-color: var(--field-forest);
+  box-shadow: none;
+  color: #fff;
+  font-size: 18px;
+  min-height: 64px;
+  transform: none;
+}
+
+.ops-error {
+  background: var(--field-danger-soft);
+  border: 1px solid var(--field-line-danger);
+  color: var(--field-danger);
+  font-size: 14px;
+}
+
+.ops-signin-note {
+  color: var(--field-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 14px 0 0;
+  text-align: center;
+}
+
+.checkin-shell>header img {
+  filter: var(--field-logo-filter);
+}
+
+.checkin-shell>header small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.checkin-shell>header b {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.stage-rail {
+  background: var(--field-forest);
+  border: 0;
+  color: #fff;
+  margin: 16px auto 0;
+  max-width: 1180px;
+  padding: 10px 16px;
+}
+
+.stage-rail>b {
+  color: var(--field-lime);
+  font-family: var(--field-numeric);
+  font-size: 28px;
+}
+
+.stage-rail>span {
+  color: #fff;
+  font-size: 14px;
+}
+
+.stage-rail>small {
+  color: var(--field-on-fill-soft);
+  font-size: 12px;
+}
+
+.stage-content {
+  max-width: 1180px;
+  padding: 16px 20px 104px;
+}
+
+.scan-card {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  color: var(--field-ink);
+}
+
+.scan-card small {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.scan-card h1 {
+  color: var(--field-ink);
+  font-size: 28px;
+}
+
+.scan-card p {
+  color: var(--field-muted);
+  font-size: 16px;
+}
+
+.scan-symbol {
+  color: var(--field-forest-ink);
+}
+
+.manual-line input {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+  min-height: 56px;
+}
+
+.manual-line button {
+  background: var(--field-surface-strong);
+  color: var(--field-forest-ink);
+  font-size: 16px;
+  min-height: 56px;
+}
+
+.stage-workspace {
+  gap: 16px;
+  grid-template-columns: minmax(0, 0.9fr) minmax(380px, 1.1fr);
+}
+
+.identity-card,
+.team-card,
+.prior-stage-card,
+.declaration-card,
+.evidence-card,
+.already-done,
+.stage-blocked {
+  padding: 18px;
+}
+
+.identity-card {
+  border-top: 4px solid var(--field-forest);
+}
+
+.identity-top {
+  border-bottom-color: var(--field-line);
+}
+
+.identity-top small,
+.identity-grid small,
+.team-card>small,
+.prior-stage-card>small,
+.declaration-card>small,
+.evidence-card>small {
+  color: var(--field-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.identity-top h1 {
+  color: var(--field-ink);
+  font-size: 28px;
+  letter-spacing: -0.025em;
+}
+
+.identity-top>strong {
+  color: var(--field-forest-ink);
+  font-family: var(--field-numeric);
+  font-size: 36px;
+}
+
+.identity-grid b {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.team-card {
+  background: var(--field-surface);
+}
+
+.team-card span b {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.team-card span small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.team-card em {
+  color: var(--field-success);
+  font-size: 12px;
+}
+
+.team-card p {
+  color: var(--field-warning);
+  font-size: 14px;
+}
+
+.prior-stage-card {
+  background: var(--field-blue-soft);
+  border-color: var(--field-line-blue);
+}
+
+.prior-stage-card b {
+  color: var(--field-ink);
+  font-size: 18px;
+}
+
+.prior-stage-card span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.verify-button,
+.asset-scan-button {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  border-radius: 11px;
+  color: var(--field-ink);
+  min-height: 92px;
+}
+
+.verify-button b,
+.asset-scan-button b {
+  font-size: 20px;
+}
+
+.verify-button span,
+.asset-scan-button span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.verify-button.confirmed {
+  background: var(--field-success-soft);
+  border-color: var(--field-success);
+  color: var(--field-success);
+}
+
+.declaration-card p {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.declaration-card label {
+  background: var(--field-surface-soft);
+  font-size: 15px;
+  min-height: 58px;
+}
+
+.evidence-card>label {
+  border-color: var(--field-line-strong);
+  color: var(--field-forest-ink);
+  min-height: 64px;
+}
+
+.evidence-card>label.captured {
+  background: var(--field-success-soft);
+  border-color: var(--field-success);
+  color: var(--field-success);
+}
+
+.asset-scan-button {
+  background: var(--field-tint-panel);
+  border-color: var(--field-line-strong);
+}
+
+.asset-scan-button small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.manual-asset input {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+  font-size: 16px;
+  min-height: 56px;
+}
+
+.complete-stage {
+  bottom: 10px;
+  box-shadow: 0 8px 24px rgb(31 51 37 / 20%);
+  position: sticky;
+  z-index: 7;
+}
+
+.stage-blocked {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+}
+
+.stage-blocked b {
+  color: var(--field-warning);
+  font-size: 20px;
+}
+
+.stage-blocked p {
+  color: var(--field-warning-ink);
+  font-size: 14px;
+}
+
+.already-done b {
+  color: var(--field-success);
+  font-size: 20px;
+}
+
+.already-done p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.signature-wrap canvas {
+  border: 1px solid var(--field-line-strong);
+  height: 180px;
+}
+
+.signature-wrap button {
+  color: var(--field-forest-ink);
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.stage-receipt {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  box-shadow: var(--field-shadow-raised);
+  color: var(--field-ink);
+}
+
+.receipt-check {
+  background: var(--field-success);
+  color: #fff;
+}
+
+.stage-receipt>small {
+  color: var(--field-success);
+  font-size: 12px;
+}
+
+.stage-receipt h1 {
+  color: var(--field-ink);
+  font-size: 38px;
+}
+
+.receipt-asset {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line);
+}
+
+.receipt-asset span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.receipt-asset b {
+  color: var(--field-forest-ink);
+  font-family: var(--field-numeric);
+  font-size: 28px;
+}
+
+.stage-receipt p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+/* Admin / Event Control */
+.ops-shell {
+  background: var(--field-canvas);
+  grid-template-columns: 190px minmax(0, 1fr);
+}
+
+.ops-side {
+  background: var(--field-tint-rail);
+  border-right: 1px solid var(--field-line);
+  padding: 16px 12px;
+}
+
+.ops-brand {
+  border-bottom-color: var(--field-line);
+}
+
+.ops-brand img {
+  filter: var(--field-logo-filter);
+}
+
+.ops-brand b {
+  color: var(--field-ink);
+  font-size: 15px;
+}
+
+.ops-side>button {
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--field-muted);
+  font-size: 15px;
+  min-height: 54px;
+  padding: 12px;
+}
+
+.ops-side>button.active {
+  background: var(--field-forest);
+  color: #fff;
+}
+
+.ops-user {
+  border-top-color: var(--field-line);
+}
+
+.ops-user b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.ops-user small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.ops-content {
+  color: var(--field-ink);
+  max-width: 1500px;
+  padding: 24px 28px 80px;
+}
+
+.ops-content>header {
+  border-bottom: 1px solid var(--field-line);
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+}
+
+.ops-content>header small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.ops-content>header h1 {
+  color: var(--field-ink);
+  font-size: 28px;
+}
+
+.ops-content>header p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.ops-message {
+  background: var(--field-blue-soft);
+  border-color: var(--field-line-blue);
+  color: var(--field-blue-ink);
+  font-size: 14px;
+  min-height: 56px;
+}
+
+.ops-message button {
+  color: inherit;
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.ops-metrics {
+  gap: 12px;
+}
+
+.ops-metrics>div {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  border-radius: 10px;
+  box-shadow: var(--field-shadow);
+  padding: 16px;
+}
+
+.ops-metrics small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.ops-metrics b {
+  color: var(--field-ink);
+  font-family: var(--field-numeric);
+  font-size: 28px;
+}
+
+.ops-grid {
+  gap: 16px;
+}
+
+.ops-grid>article,
+.ops-panel {
+  padding: 18px;
+}
+
+.ops-content h2 {
+  color: var(--field-ink);
+  font-size: 20px;
+}
+
+.ops-content p {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.ops-content input,
+.ops-content select,
+.ops-content textarea {
+  background: var(--field-surface);
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+  font-size: 16px;
+  min-height: 56px;
+}
+
+.ops-content textarea {
+  line-height: 1.5;
+  min-height: 140px;
+}
+
+.ops-content label {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.ops-content button,
+.ops-content a {
+  font-size: 15px;
+  min-height: 56px;
+}
+
+.ops-content a {
+  align-items: center;
+  color: var(--field-forest-ink);
+  display: inline-flex;
+  font-weight: 700;
+}
+
+.sync-action,
+.participant-sync-btn {
+  background: var(--field-forest);
+  color: #fff;
+}
+
+.ops-row {
+  border-bottom-color: var(--field-line);
+  min-height: 68px;
+  padding: 12px 4px;
+}
+
+.ops-row b {
+  color: var(--field-ink);
+  font-size: 15px;
+}
+
+.ops-row small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.ops-row>span {
+  font-size: 13px;
+}
+
+.ops-row button {
+  min-height: 44px;
+}
+
+.good {
+  color: var(--field-success);
+}
+
+.warn {
+  color: var(--field-warning);
+}
+
+.sync-result {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+}
+
+.sync-result.failed {
+  background: var(--field-danger-soft);
+  border-color: var(--field-line-danger);
+}
+
+.sync-result b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.sync-result span {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.policy-switches label {
+  background: var(--field-surface-soft);
+  border-color: var(--field-line);
+  min-height: 72px;
+}
+
+.policy-switches b {
+  color: var(--field-ink);
+  font-size: 15px;
+}
+
+.policy-switches small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.exception-row {
+  border-color: var(--field-line);
+}
+
+.exception-row small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.exception-row b {
+  color: var(--field-ink);
+  font-size: 16px;
+}
+
+.exception-row p,
+.exception-row span {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+/* Shared read-only and feedback panels */
+.history-lock {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.history-penalties {
+  border-top-color: var(--field-line);
+}
+
+.history-penalties>div {
+  border-color: var(--field-line);
+}
+
+.history-penalties span {
+  font-size: 14px;
+}
+
+.history-penalties b {
+  font-family: var(--field-numeric);
+  font-size: 18px;
+}
+
+.history-penalties small {
+  color: var(--field-muted);
+  font-size: 12px;
+}
+
+.history-total {
+  background: var(--field-success-soft);
+}
+
+.history-total span {
+  font-size: 14px;
+}
+
+.history-total b {
+  color: var(--field-forest-ink);
+  font-family: var(--field-numeric);
+}
+
+.history-empty {
+  color: var(--field-muted);
+  font-size: 14px;
+}
+
+.sync-warning {
+  background: var(--field-warning-soft);
+  border-color: var(--field-line-warning);
+}
+
+.sync-warning b {
+  color: var(--field-ink);
+  font-size: 14px;
+}
+
+.sync-warning span {
+  color: var(--field-warning-ink);
+  font-size: 12px;
+}
+
+/* Legacy brand conflict guardrails. Keep operational surfaces calm and consistent. */
+.page-heading h2,
+.race-header h2,
+.sequence-head h2,
+.station-card h3,
+.timing-stage-card>h1,
+.admin-shell .ops-content header h1,
+.admin-shell .ops-grid h2,
+.admin-shell .ops-panel h2 {
+  font-family: var(--field-font);
+  font-style: normal;
+  text-transform: none;
+}
+
+.event-card.featured,
+.event-card.featured:hover {
+  background: var(--field-surface);
+  border-color: var(--field-line);
+  border-top: 4px solid var(--field-forest);
+  color: var(--field-ink);
+}
+
+.event-card::before {
+  display: none;
+}
+
+.event-card.featured .event-cta,
+.event-card.muted .event-cta {
+  background: var(--field-tint-panel);
+  color: var(--field-forest-ink);
+}
+
+.primary:not(:disabled):hover,
+.stage-primary:not(:disabled):hover,
+.ops-primary:not(:disabled):hover,
+.timing-primary:not(:disabled):hover {
+  background: var(--field-forest-hover);
+  border-color: var(--field-forest-hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.stage-shell,
+.stage-shell.stage-two {
+  background: var(--field-canvas);
+}
+
+.checkin-shell>header {
+  background: var(--field-surface);
+  border-bottom: 1px solid var(--field-line);
+  box-shadow: 0 2px 12px rgb(26 42 30 / 6%);
+  height: 64px;
+}
+
+.checkin-shell>header::after {
+  display: none;
+}
+
+.checkin-shell header small {
+  color: var(--field-muted);
+}
+
+.checkin-shell header b {
+  color: var(--field-ink);
+}
+
+.checkin-shell header .ops-live {
+  background: var(--field-success-soft);
+  border-color: var(--field-line-success);
+  color: var(--field-success);
+}
+
+/* Ends this counter's shift, not the judge session that may be signed in on
+   the same tablet. Kept quiet and full-height-tappable: a volunteer reaches
+   for it at handover, never mid-athlete. */
+.checkin-shell header .checkin-signout {
+  background: transparent;
+  border: 1px solid var(--field-line);
+  border-radius: 10px;
+  color: var(--field-muted);
+  font-size: 13px;
+  min-height: 44px;
+  padding: 0 12px;
+}
+
+.checkin-shell header .checkin-signout:hover {
+  color: var(--field-ink);
+}
+
+.stage-rail {
+  background: var(--field-forest);
+  box-shadow: none;
+  min-height: 64px;
+}
+
+.stage-rail>b {
+  color: var(--field-lime);
+  font-size: 28px;
+}
+
+.identity-card {
+  border-top: 4px solid var(--field-forest);
+}
+
+.identity-top>strong {
+  color: var(--field-forest-ink);
+}
+
+.asset-scan-button {
+  background: var(--field-tint-panel);
+  border-color: var(--field-line-strong);
+}
+
+.admin-shell .ops-side {
+  background: var(--field-tint-rail);
+  border-right: 1px solid var(--field-line);
+  box-shadow: none;
+}
+
+.admin-shell .ops-brand {
+  border-color: var(--field-line);
+}
+
+.admin-shell .ops-brand b,
+.admin-shell .ops-user,
+.admin-shell .ops-user small {
+  color: var(--field-ink);
+}
+
+.admin-shell .ops-side>button {
+  color: var(--field-muted);
+  min-height: 54px;
+}
+
+.admin-shell .ops-side>button.active {
+  background: var(--field-forest);
+  box-shadow: none;
+  color: #fff;
+}
+
+.admin-shell .ops-content>header {
+  border-bottom: 1px solid var(--field-line);
+  padding-bottom: 16px;
+}
+
+.admin-shell .ops-content header h1 {
+  font-size: 28px;
+}
+
+.admin-shell .ops-metrics>div,
+.admin-shell .ops-grid article,
+.admin-shell .ops-panel {
+  border-color: var(--field-line);
+  border-radius: 10px;
+  box-shadow: var(--field-shadow);
+}
+
+.admin-shell .ops-metrics>div {
+  border-top: 1px solid var(--field-line);
+}
+
+.admin-shell .ops-metrics>div:nth-child(1),
+.admin-shell .ops-metrics>div:nth-child(2),
+.admin-shell .ops-metrics>div:nth-child(3),
+.admin-shell .ops-metrics>div:nth-child(4) {
+  border-top: 4px solid var(--field-success);
+}
+
+.admin-shell .ops-metrics>div:nth-child(5) {
+  border-top: 4px solid var(--field-warning);
+}
+
+.admin-shell .ops-metrics>div:nth-child(6) {
+  border-top: 4px solid var(--field-danger);
+}
+
+.admin-shell .ops-grid article p {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.admin-shell .ops-grid article button,
+.admin-shell .ops-grid article a,
+.admin-shell .exception-row button,
+.admin-shell .station-row>button {
+  font-size: 14px;
+  min-height: 56px;
+  padding: 14px;
+}
+
+.admin-shell .ops-grid article button.sync-action,
+.admin-shell .participant-sync-btn {
+  background: var(--field-forest);
+  border-color: var(--field-forest);
+  color: #fff;
+}
+
+/* Landscape tablet fallback */
+@media (max-width: 1100px) {
+  .workspace {
+    grid-template-columns: 168px minmax(0, 1fr);
+  }
+
+  .content {
+    padding-inline: 20px;
+  }
+
+  .timing-layout {
+    grid-template-columns: minmax(0, 1fr) 250px;
+  }
+
+  .timing-stage-card {
+    padding: 20px;
+  }
+
+  .timing-stage-card>h1 {
+    font-size: 34px;
+  }
+
+  .ops-shell {
+    grid-template-columns: 168px minmax(0, 1fr);
+  }
+
+  .ops-content {
+    padding-inline: 20px;
+  }
+}
+
+@media (max-width: 850px) {
+  .login-grid {
+    grid-template-columns: 1fr;
+    padding: 28px;
+  }
+
+  .login-copy {
+    display: none;
+  }
+
+  .login-card {
+    margin: auto;
+    max-width: 560px;
+    width: 100%;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace>aside {
+    display: none;
+  }
+
+  .content {
+    padding: 18px 16px 96px;
+  }
+
+  .timing-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .timing-splits-panel {
+    order: 2;
+  }
+
+  .timing-split-list {
+    max-height: 260px;
+  }
+
+  .stage-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .ops-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .ops-side {
+    display: flex;
+    height: auto;
+    overflow-x: auto;
+    padding: 8px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .ops-side>button {
+    flex: 0 0 auto;
+    min-height: 48px;
+    white-space: nowrap;
+  }
+
+  .ops-brand,
+  .ops-user {
+    display: none;
+  }
+
+  .ops-content {
+    padding: 18px 16px 80px;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    padding: 0 12px;
+  }
+
+  .brand span {
+    display: none;
+  }
+
+  .page-heading {
+    align-items: flex-start;
+    display: block;
+  }
+
+  .clock,
+  .assignment {
+    display: none;
+  }
+
+  .participant-search-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .event-grid,
+  .ops-grid,
+  .ops-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .timing-athlete-rail {
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 10px 12px;
+  }
+
+  .timing-clock {
+    border-top: 1px solid var(--field-line);
+    grid-column: 1 / -1;
+    padding-top: 10px;
+    text-align: left;
+  }
+
+  .timing-bib {
+    border-right: 0;
+    padding-right: 0;
+  }
+
+  .timing-stage-card {
+    padding: 18px 14px;
+  }
+
+  .timing-stage-card>h1 {
+    font-size: 32px;
+  }
+
+  .timing-outcomes {
+    grid-template-columns: 1fr;
+  }
+
+  .timing-sequence,
+  .timing-recall-progress,
+  .timing-review-row {
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .timing-colour-buttons {
+    grid-template-columns: repeat(2, 1fr);
+    min-height: 300px;
+  }
+
+  .timing-colour-buttons button {
+    min-height: 145px;
+  }
+
+  .doubles-lanes,
+  .history-penalties {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-rail {
+    margin: 10px 10px 0;
+  }
+
+  .stage-content {
+    padding-inline: 12px;
+  }
+
+  .identity-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Phone-only field controls. The 641px boundary is deliberate: the tablet
+ * console above it is a protected UI and must not inherit any dock behavior. */
+@media (max-width: 640px) {
+  :root {
+    --mobile-action-dock-height: 112px;
+  }
+
+  .app-shell:has(.mobile-action-dock) {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .app-shell:has(.mobile-action-dock) .topbar {
+    height: calc(64px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .app-shell:has(.mobile-action-dock) .workspace {
+    height: calc(100dvh - 64px - env(safe-area-inset-top));
+    min-height: 0;
+  }
+
+  .app-shell:has(.mobile-action-dock) .content {
+    height: calc(100dvh - 64px - env(safe-area-inset-top));
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    padding-bottom: calc(var(--mobile-action-dock-height) + env(safe-area-inset-bottom) + 24px);
+    scroll-padding-bottom: calc(var(--mobile-action-dock-height) + env(safe-area-inset-bottom) + 24px);
+  }
+
+  .app-shell:has(.timing-dock-stack) .content {
+    padding-bottom: calc(360px + env(safe-area-inset-bottom));
+    scroll-padding-bottom: calc(360px + env(safe-area-inset-bottom));
+  }
+
+  .app-shell:has(.mobile-action-dock) .timing-athlete-rail {
+    position: static;
+  }
+
+  .checkin-shell:has(.mobile-action-dock) {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+    padding-bottom: calc(var(--mobile-action-dock-height) + env(safe-area-inset-bottom));
+  }
+
+  .checkin-shell:has(.mobile-action-dock)>header {
+    flex: 0 0 calc(64px + env(safe-area-inset-top));
+    height: calc(64px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .checkin-shell:has(.mobile-action-dock) .stage-rail {
+    flex: 0 0 auto;
+  }
+
+  .checkin-shell:has(.mobile-action-dock) .stage-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    padding-bottom: 24px;
+    scroll-padding-bottom: 24px;
+    width: 100%;
+  }
+
+  .mobile-action-dock {
+    align-items: center;
+    background: color-mix(in srgb, var(--field-surface) 96%, transparent);
+    border-top: 1px solid var(--field-line-strong);
+    bottom: 0;
+    box-shadow: 0 -10px 28px rgb(31 51 37 / 16%);
+    display: flex;
+    left: 0;
+    min-height: calc(var(--mobile-action-dock-height) + env(safe-area-inset-bottom));
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    pointer-events: none;
+    position: fixed;
+    right: 0;
+    z-index: 14;
+  }
+
+  .mobile-action-dock>button,
+  .mobile-action-dock>.timing-dock-stack {
+    margin: 0 auto !important;
+    max-width: 620px;
+    min-height: 76px;
+    pointer-events: auto;
+    position: static !important;
+    width: 100%;
+  }
+
+  .timing-dock-stack {
+    display: grid;
+    gap: 8px;
+  }
+
+  .mobile-action-dock .timing-outcomes {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mobile-action-dock .timing-outcomes label {
+    min-height: 52px;
+    padding: 7px 5px;
+    text-align: center;
+  }
+
+  .mobile-action-dock .timing-outcomes label>span {
+    display: none;
+  }
+
+  .mobile-action-dock .timing-note {
+    grid-column: 1 / -1;
+  }
+
+  .mobile-action-dock .timing-note>span {
+    display: block;
+  }
+
+  .mobile-action-dock .timing-note textarea {
+    min-height: 48px;
+  }
+
+  .mobile-action-dock .timing-colour-buttons {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    min-height: 0;
+  }
+
+  .mobile-action-dock .timing-colour-buttons button {
+    min-height: 72px;
+    padding: 6px 2px;
+  }
+
+  .mobile-action-dock .timing-colour-buttons button b {
+    font-size: 12px;
+  }
+
+  .mobile-action-dock .timing-colour-buttons button span {
+    font-size: 9px;
+  }
+
+  .timing-recall-edits {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .mobile-action-dock .timing-undo {
+    min-height: 48px;
+    pointer-events: auto;
+    width: 100%;
+  }
+
+  .timing-clock-strip {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+  }
+
+  .mobile-action-dock .timing-primary,
+  .mobile-action-dock .complete-stage {
+    bottom: auto;
+    box-shadow: 0 7px 20px rgb(31 51 37 / 22%);
+  }
+
+  .timing-colour-buttons button {
+    touch-action: manipulation;
+  }
+
+  .theme-toggle,
+  .modal-close,
+  .checkin-reset,
+  .help-desk-action,
+  .timing-reset,
+  .back {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .theme-toggle {
+    justify-content: center;
+    padding-inline: 0;
+    width: 44px;
+  }
+
+  .checkin-reset,
+  .help-desk-action {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    padding: 8px 12px;
+  }
+
+  .modal-backdrop,
+  .qr-backdrop {
+    box-sizing: border-box;
+    overflow: hidden;
+    padding: calc(10px + env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .help-modal,
+  .qr-modal {
+    max-height: calc(100dvh - 20px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .qr-camera {
+    max-height: min(58dvh, 420px);
+  }
+
+  body:has(.mobile-action-dock) .toast {
+    bottom: calc(var(--mobile-action-dock-height) + env(safe-area-inset-bottom) + 12px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* One race-wide athlete note; kept outside timing/action layout regions. */
+.athlete-note-chip {
+  margin: 10px 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--forest, #0b633f);
+  border-radius: 999px;
+  padding: 9px 14px;
+  background: #fff;
+  color: var(--forest, #0b633f);
+  font-weight: 800;
+}
+
+.athlete-note-chip.has-note { background: var(--forest, #0b633f); color: #fff; }
+.athlete-note-chip i { width: 7px; height: 7px; border-radius: 50%; background: #d99116; }
+.athlete-note-readonly { margin-top: 10px; padding: 13px 15px; border: 1px solid var(--line, #d8dfda); border-radius: 12px; background: #fff; }
+.athlete-note-readonly small { color: var(--forest, #0b633f); font-weight: 900; letter-spacing: .08em; }
+.athlete-note-readonly p { margin: 6px 0 0; white-space: pre-wrap; }
+.athlete-note-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; justify-content: flex-end; align-items: center; padding: 24px; background: rgba(8, 25, 17, .48); }
+.athlete-note-editor { width: min(430px, 100%); padding: 22px; border-radius: 18px; background: #fff; box-shadow: 0 22px 60px rgba(0, 0, 0, .25); }
+.athlete-note-editor h2,
+.athlete-note-editor p { margin: 0 0 8px; }
+.athlete-note-editor textarea { width: 100%; min-height: 150px; resize: vertical; box-sizing: border-box; border: 1px solid var(--line, #aebbb3); border-radius: 10px; padding: 12px; font: inherit; }
+.athlete-note-editor > small { display: block; margin: 4px 0 12px; text-align: right; color: var(--muted, #68776f); }
+
+@media (max-width: 599px) and (orientation: portrait) {
+  .athlete-note-backdrop { align-items: flex-end; padding: 0; }
+  .athlete-note-editor { width: 100%; max-height: calc(100dvh - 24px); overflow: auto; border-radius: 20px 20px 0 0; padding: 20px 18px max(20px, env(safe-area-inset-bottom)); }
+}

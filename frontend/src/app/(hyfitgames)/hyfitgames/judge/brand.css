@@ -1,0 +1,831 @@
+/* HYFIT Games 2026 brand skin. Presentation only; operational logic is unchanged. */
+:root {
+  --hyfit-lime: #cef932;
+  --hyfit-blue: #0381ed;
+  --hyfit-red: #ff0c31;
+  --hyfit-green: #009640;
+  --hyfit-orange: #fc7b00;
+  --hyfit-purple: #ae78d2;
+  --hyfit-yellow: #fbd12c;
+  --hyfit-pink: #ff9ff3;
+  --hyfit-mid: #d5d4ce;
+  --hyfit-light: #f3f3f0;
+  --hyfit-graphite: #121410;
+  --hyfit-panel: #191c18;
+  --hyfit-raised: #222620;
+  --hyfit-line: #343a32;
+  --hyfit-ink: #f8f8f4;
+  --hyfit-muted: #a7aca4;
+  --hyfit-display:
+    "Arial Narrow", "Avenir Next Condensed", "Roboto Condensed", Impact,
+    sans-serif;
+  --hyfit-interface:
+    Sora, "Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif;
+  --hyfit-numeric: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+
+  /* Transitional aliases for the existing component layer. */
+  --brand: var(--hyfit-red);
+  --brand-bright: var(--hyfit-red);
+  --lime: var(--hyfit-lime);
+  --danger: var(--hyfit-red);
+  --ink: var(--hyfit-ink);
+  --muted: var(--hyfit-muted);
+  --panel: var(--hyfit-panel);
+  --line: var(--hyfit-line);
+  --ops-bg: #0d0f0c;
+  --ops-panel: var(--hyfit-panel);
+  --ops-raised: var(--hyfit-raised);
+  --ops-line: var(--hyfit-line);
+  --ops-text: var(--hyfit-ink);
+  --ops-muted: var(--hyfit-muted);
+  --ops-lime: var(--hyfit-lime);
+  --ops-red: var(--hyfit-red);
+  --ops-good: #39d676;
+  --ops-warn: var(--hyfit-yellow);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font-family: var(--hyfit-interface);
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--hyfit-blue);
+  outline-offset: 3px;
+}
+
+input:focus-visible {
+  outline: none;
+}
+
+button:not(:disabled) {
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.brand-logo,
+.ops-brand img,
+.ops-login-card > img,
+.checkin-shell header img {
+  object-fit: contain;
+}
+
+.brand-logo {
+  width: 76px;
+  height: 54px;
+}
+
+.topbar {
+  height: 78px;
+  border-bottom: 0;
+  background: linear-gradient(
+    102deg,
+    var(--hyfit-red) 0 42%,
+    #d80028 42% 58%,
+    #11130f 58%
+  );
+  box-shadow: 0 8px 30px #0008;
+}
+
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 48%;
+  top: 0;
+  width: 92px;
+  height: 100%;
+  background: var(--hyfit-lime);
+  transform: skewX(-24deg);
+  opacity: 0.98;
+  pointer-events: none;
+}
+
+.brand {
+  position: relative;
+  z-index: 1;
+}
+
+.brand b,
+.ops-brand b,
+.card-kicker,
+.eyebrow,
+.station-number,
+.timing-stage-kicker,
+.stage-rail > span,
+.ops-kicker {
+  font-family: var(--hyfit-display);
+  font-style: italic;
+  font-stretch: condensed;
+  text-transform: uppercase;
+}
+
+.brand b {
+  font-size: 15px;
+  letter-spacing: 0.055em;
+}
+
+.brand small {
+  color: #fff;
+  opacity: 0.82;
+}
+
+.app-shell {
+  background:
+    radial-gradient(circle at 88% 8%, #253317 0, transparent 27%),
+    linear-gradient(145deg, #0b0d0a 0, #151914 54%, #090b09 100%);
+}
+
+.login-grid {
+  position: relative;
+}
+
+.login-grid::before {
+  content: "RUN / LIFT / LIVE";
+  position: absolute;
+  right: 44%;
+  top: 9%;
+  color: #ffffff0a;
+  font: italic 900 clamp(64px, 10vw, 150px) / 0.72 var(--hyfit-display);
+  letter-spacing: -0.06em;
+  writing-mode: vertical-rl;
+  pointer-events: none;
+}
+
+.login-copy h1,
+.page-heading h2,
+.race-header h2,
+.sequence-head h2,
+.station-card h3,
+.finish-wrap h2,
+.timing-stage-card h1,
+.timing-complete h1 {
+  font-family: var(--hyfit-display);
+  font-style: italic;
+  font-stretch: condensed;
+  text-transform: uppercase;
+  letter-spacing: -0.025em;
+}
+
+.login-copy h1 {
+  letter-spacing: -0.045em;
+  text-shadow: 7px 7px 0 #000;
+}
+
+.login-copy h1 em {
+  color: var(--hyfit-lime);
+}
+
+.login-card,
+.verify-card,
+.station-card,
+.standard-card,
+.comparison-panel,
+.result-card,
+.history-detail {
+  border-radius: 18px;
+  border-color: var(--hyfit-line);
+  box-shadow: 0 22px 60px #0006;
+}
+
+.login-card {
+  border-top: 6px solid var(--hyfit-blue);
+}
+
+.primary,
+.stage-primary,
+.timing-primary,
+.ops-primary,
+.ops-login-card > button {
+  min-height: 56px;
+  background: var(--hyfit-lime);
+  color: #11150d;
+  border: 2px solid var(--hyfit-lime);
+  border-radius: 10px;
+  box-shadow: 5px 5px 0 #050605;
+  font-weight: 900;
+}
+
+.primary:not(:disabled):hover,
+.stage-primary:not(:disabled):hover,
+.timing-primary:not(:disabled):hover,
+.ops-primary:not(:disabled):hover,
+.ops-login-card > button:not(:disabled):hover {
+  background: #ddff5f;
+  border-color: #ddff5f;
+  box-shadow: 7px 7px 0 #050605;
+  transform: translate(-2px, -2px);
+}
+
+.event-card {
+  border-radius: 14px;
+}
+
+.event-card.featured {
+  border-top: 6px solid var(--hyfit-red);
+  background:
+    linear-gradient(115deg, transparent 70%, #cef93212 70%), var(--hyfit-panel);
+}
+
+.event-card::before {
+  border: 0;
+  width: 12px;
+  height: 150%;
+  right: 38px;
+  top: -25%;
+  border-radius: 0;
+  background: var(--hyfit-red);
+  transform: rotate(24deg);
+}
+
+.event-logo {
+  width: 145px;
+  height: 98px;
+  margin: 18px 0 4px;
+}
+
+.event-top > span {
+  background: var(--hyfit-red);
+  border-radius: 3px;
+}
+
+.event-cta {
+  background: var(--hyfit-lime);
+  color: #11150d;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.workspace > aside {
+  background: #10130f;
+}
+
+.workspace nav button {
+  min-height: 46px;
+}
+
+.workspace nav button.active {
+  background: var(--hyfit-lime);
+  color: #10130f;
+  box-shadow: inset 6px 0 0 var(--hyfit-blue);
+}
+
+.judge-chip > span,
+.avatar {
+  color: #10130f;
+  background: var(--hyfit-lime);
+  border-color: var(--hyfit-lime);
+}
+
+.big-bib,
+.bib,
+.clock,
+.race-total b,
+.timer-ring,
+.history-total b,
+.result-metrics b,
+.timing-clock b,
+.timing-bib,
+.timing-final-time,
+.ops-metrics b,
+.identity-top > strong,
+.stage-rail > b {
+  font-family: var(--hyfit-numeric);
+  font-variant-numeric: tabular-nums;
+}
+
+.big-bib {
+  color: var(--hyfit-lime);
+  font-size: 34px;
+}
+
+.participant-search-actions .search-box {
+  border-left: 6px solid var(--hyfit-blue);
+}
+
+.scan-qr-btn {
+  border-color: var(--hyfit-blue);
+  background: #071e33;
+  color: #65b7ff;
+}
+
+.athlete-row:hover {
+  box-shadow: inset 6px 0 0 var(--hyfit-lime);
+}
+
+.progress::before {
+  height: 4px;
+  top: 12px;
+  background: repeating-linear-gradient(
+    110deg,
+    #333a31 0 18px,
+    transparent 18px 23px
+  );
+}
+
+.progress .done i {
+  background: var(--hyfit-green);
+  border-color: var(--hyfit-green);
+  color: white;
+}
+
+.progress .current i {
+  box-shadow: 0 0 0 5px #cef93225;
+}
+
+.station-card {
+  border-top: 6px solid var(--hyfit-lime);
+}
+
+.station-number {
+  color: var(--hyfit-lime);
+}
+
+.standard-card {
+  border-top: 6px solid var(--hyfit-blue);
+}
+
+.penalty-pills button,
+.recall-penalty button,
+.colour-controls button {
+  min-height: 52px;
+}
+
+.penalty-pills button.active,
+.recall-penalty button.active {
+  background: var(--hyfit-red);
+  border-color: var(--hyfit-red);
+  color: white;
+}
+
+.finish-wrap .success-mark,
+.timing-complete-mark,
+.receipt-check {
+  background: var(--hyfit-lime);
+  color: #10130f;
+  border-radius: 8px;
+  transform: rotate(-5deg);
+}
+
+/* Manual Timing: the course strip becomes a true branded race-slash timeline. */
+.timing-console {
+  --timing-accent: var(--hyfit-lime);
+}
+
+.timing-athlete-rail {
+  border-top: 6px solid var(--hyfit-red);
+  background:
+    linear-gradient(110deg, #191d17 0 73%, #0381ed22 73%), var(--hyfit-panel);
+}
+
+.timing-clock-strip {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.timing-clock-strip > div {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  text-align: center;
+}
+
+.timing-clock-strip > div + div {
+  border-left: 1px solid var(--field-line);
+}
+.timing-clock-strip small {
+  color: var(--field-muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.timing-clock-strip b {
+  color: var(--timing-blue);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+.timing-queue-state {
+  color: var(--field-success);
+  font-size: 10px;
+  font-weight: 800;
+  margin: -4px 0 12px;
+  text-align: right;
+}
+
+.timing-queue-state.pending {
+  color: var(--timing-amber);
+}
+
+.timing-undo {
+  background: var(--field-surface);
+  border: 1px solid var(--field-line-strong);
+  border-radius: 10px;
+  color: var(--field-forest);
+  cursor: pointer;
+  font-weight: 800;
+  min-height: 52px;
+  padding: 10px 16px;
+}
+
+.timing-undo:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.timing-bib {
+  color: var(--hyfit-lime);
+  font-size: clamp(36px, 6vw, 68px);
+}
+
+.timing-clock b {
+  font-size: clamp(28px, 5vw, 54px);
+  color: var(--hyfit-lime);
+}
+
+.timing-course-strip {
+  background: repeating-linear-gradient(
+    110deg,
+    #252b23 0 36px,
+    #121410 36px 43px
+  );
+  border-radius: 8px;
+}
+
+.timing-course-strip .active {
+  background: var(--hyfit-lime);
+  color: #11150d;
+}
+
+.timing-stage-card {
+  border-top: 7px solid var(--hyfit-lime);
+  background:
+    linear-gradient(120deg, transparent 78%, #cef93212 78%), var(--hyfit-panel);
+}
+
+.timing-splits-panel {
+  border-top: 7px solid var(--hyfit-blue);
+}
+
+.timing-split-list b,
+.timing-cognitive-result b {
+  font-family: var(--hyfit-numeric);
+  font-variant-numeric: tabular-nums;
+}
+
+.timing-outcomes button {
+  min-height: 64px;
+}
+
+.timing-primary.danger,
+.timing-ooc {
+  background: var(--hyfit-red);
+  color: white;
+  border-color: var(--hyfit-red);
+}
+
+/* Check-In: identity blue with explicit stage numbering and large field actions. */
+.checkin-login {
+  background:
+    linear-gradient(125deg, #0381ed 0 34%, transparent 34%),
+    radial-gradient(circle at 80% 20%, #103858 0, transparent 34%), #0b0d0b;
+}
+
+.checkin-login .ops-login-card {
+  border-top: 7px solid var(--hyfit-blue);
+}
+
+.stage-shell {
+  --stage-accent: var(--hyfit-blue);
+  --stage-soft: #0b2942;
+  background:
+    linear-gradient(112deg, #0381ed12 0 22%, transparent 22%),
+    linear-gradient(145deg, #0a0d0b, #121813 50%, #080a08);
+}
+
+.stage-shell.stage-two {
+  --stage-accent: var(--hyfit-blue);
+  --stage-soft: #0b2942;
+}
+
+.checkin-shell > header {
+  height: 80px;
+  background: var(--hyfit-blue);
+  border: 0;
+  box-shadow: 0 8px 28px #0007;
+}
+
+.checkin-shell > header::after {
+  content: "";
+  position: absolute;
+  left: 34%;
+  height: 80px;
+  width: 35px;
+  background: var(--hyfit-lime);
+  transform: skewX(-24deg);
+}
+
+.checkin-shell header small,
+.checkin-shell header b {
+  color: white;
+}
+
+.checkin-shell header .ops-live {
+  color: #102207;
+  background: var(--hyfit-lime);
+  border-color: var(--hyfit-lime);
+}
+
+.stage-rail {
+  min-height: 82px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(108deg, var(--hyfit-blue) 0 17%, #10283a 17%);
+  box-shadow: 6px 6px 0 #050706;
+}
+
+.stage-rail > b {
+  color: white;
+  font-size: 46px;
+}
+
+.identity-card {
+  border-top: 7px solid var(--hyfit-blue);
+}
+
+.identity-top > strong {
+  color: var(--hyfit-blue);
+}
+
+.verify-button.confirmed {
+  border-color: var(--hyfit-green);
+  background: #073f20;
+  color: white;
+}
+
+.asset-scan-button {
+  border-color: var(--hyfit-blue);
+  background: #09283f;
+}
+
+.asset-scan-button small {
+  color: #69bdff;
+}
+
+.stage-receipt {
+  border-top: 8px solid var(--hyfit-lime);
+}
+
+/* Admin: light-neutral control canvas with a red event shell. */
+.admin-login {
+  background:
+    linear-gradient(125deg, var(--hyfit-red) 0 36%, transparent 36%),
+    var(--hyfit-graphite);
+}
+
+.admin-login .ops-login-card {
+  border-top: 7px solid var(--hyfit-red);
+}
+
+.admin-shell {
+  color-scheme: light;
+  background: var(--hyfit-light);
+  color: #171a16;
+}
+
+.admin-shell .ops-side {
+  background: var(--hyfit-red);
+  border: 0;
+  box-shadow: 8px 0 30px #4d071533;
+}
+
+.admin-shell .ops-brand {
+  border-color: #ffffff55;
+}
+
+.admin-shell .ops-brand b,
+.admin-shell .ops-user,
+.admin-shell .ops-user small {
+  color: white;
+}
+
+.admin-shell .ops-side > button {
+  min-height: 46px;
+  color: #fff;
+  font-weight: 750;
+}
+
+.admin-shell .ops-side > button.active {
+  color: #10130f;
+  background: var(--hyfit-lime);
+  box-shadow: 5px 5px 0 #8b0018;
+}
+
+.admin-shell .ops-content > header {
+  border-bottom: 4px solid #171a16;
+  padding-bottom: 20px;
+}
+
+.admin-shell .ops-content header h1,
+.admin-shell .ops-grid h2,
+.admin-shell .ops-panel h2 {
+  font-family: var(--hyfit-display);
+  font-style: italic;
+  text-transform: uppercase;
+  letter-spacing: -0.01em;
+}
+
+.admin-shell .ops-content header h1 {
+  font-size: clamp(34px, 5vw, 56px);
+}
+
+.admin-shell .ops-content header small,
+.admin-shell .ops-content header p,
+.admin-shell .ops-metrics small,
+.admin-shell .ops-row small,
+.admin-shell .admin-help,
+.admin-shell .integration-heading p {
+  color: #60655e;
+}
+
+.admin-shell .ops-metrics > div,
+.admin-shell .ops-grid article,
+.admin-shell .ops-panel {
+  color: #171a16;
+  background: white;
+  border-color: #d2d4cd;
+  border-radius: 10px;
+  box-shadow: 4px 4px 0 #d5d4ce;
+}
+
+.admin-shell .ops-metrics > div:nth-child(1) {
+  border-top: 5px solid var(--hyfit-blue);
+}
+
+.admin-shell .ops-metrics > div:nth-child(2),
+.admin-shell .ops-metrics > div:nth-child(3),
+.admin-shell .ops-metrics > div:nth-child(4) {
+  border-top: 5px solid var(--hyfit-green);
+}
+
+.admin-shell .ops-metrics > div:nth-child(5) {
+  border-top: 5px solid var(--hyfit-yellow);
+}
+
+.admin-shell .ops-metrics > div:nth-child(6) {
+  border-top: 5px solid var(--hyfit-red);
+}
+
+.admin-shell .ops-grid article p,
+.admin-shell .ops-row,
+.admin-shell .exception-row {
+  color: #363a34;
+  border-color: #dfe0da;
+}
+
+.admin-shell .ops-grid article button,
+.admin-shell .ops-grid article a,
+.admin-shell .exception-row button,
+.admin-shell .station-row > button {
+  background: #f1f2ee;
+  color: #171a16;
+  border-color: #c8cbc3;
+}
+
+.admin-shell .ops-grid article button.sync-action,
+.admin-shell .participant-sync-btn {
+  background: #e7ffc4;
+  color: #183000;
+  border-color: #9bc600;
+}
+
+.admin-shell .ops-panel input,
+.admin-shell .ops-panel select,
+.admin-shell .ops-panel textarea {
+  background: white;
+  color: #171a16;
+  border-color: #bfc3ba;
+}
+
+.admin-shell .ops-panel label {
+  color: #4f554c;
+}
+
+.admin-shell .policy-switches label {
+  background: #f7f7f4;
+  border-color: #cfd2ca;
+}
+
+.admin-shell .policy-switches span b {
+  color: #171a16;
+}
+
+@media (max-width: 850px) {
+  .topbar::after,
+  .checkin-shell > header::after {
+    display: none;
+  }
+
+  .admin-shell .ops-side {
+    background: var(--hyfit-red);
+    box-shadow: 0 5px 18px #4d071533;
+  }
+
+  .admin-shell .ops-side > button {
+    min-width: max-content;
+  }
+
+  .timing-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 580px) {
+  .topbar {
+    height: 68px;
+    padding-inline: 15px;
+    background: var(--hyfit-red);
+  }
+
+  .brand-logo {
+    width: 62px;
+    height: 44px;
+  }
+
+  .brand > span {
+    display: none;
+  }
+
+  .login-grid::before {
+    display: none;
+  }
+
+  .event-logo {
+    width: 120px;
+    height: 82px;
+  }
+
+  .stage-rail {
+    min-height: 68px;
+  }
+
+  .stage-rail > b {
+    font-size: 34px;
+  }
+
+  .colour-controls button,
+  .timing-colour-buttons button {
+    min-height: 62px;
+  }
+
+  .admin-shell .ops-content {
+    padding-top: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

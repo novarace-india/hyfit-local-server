@@ -1,0 +1,146 @@
+/* Judge app theming. Loaded after tablet.css so it owns the final palette.
+ *
+ * tablet.css defines the field UI as a light design system built on --field-*
+ * tokens. This file completes that layer — it declares the handful of tokens
+ * that were still hard-coded in tablet.css rules, and adds the dark palette
+ * under [data-theme="dark"].
+ *
+ * Light is the default and is unchanged: with no data-theme attribute the app
+ * renders exactly as it did before this file existed.
+ *
+ * Dark is not a mechanical inversion. Surfaces lift off the canvas in the same
+ * order they do in light (canvas < surface < surface-soft < surface-strong), the
+ * forest fill is lightened so it still reads as a filled control against a dark
+ * page, and the status hues are re-picked for contrast rather than flipped —
+ * a 4.5:1 amber on white is a muddy brown on black. Lime is identical in both
+ * themes: it is the app's single "act now" colour and must not shift meaning.
+ */
+
+:root {
+  /* Tokens lifted out of tablet.css rules. Values are the originals, except
+   * where several near-identical pastels (six greens within 3% of each other,
+   * five ambers, six reds) collapsed onto one token per family. */
+  --field-tint-rail: #e5eae4;
+  --field-tint-panel: #e9efe8;
+  --field-track: #d9dfd9;
+  --field-track-done: #85a98f;
+  --field-line-success: #b3d1bb;
+  --field-line-warning: #e2c592;
+  --field-line-danger: #dba6a2;
+  --field-line-blue: #b7d0dc;
+  --field-on-fill-soft: #d7e0d9;
+  --field-warning-ink: #765526;
+  --field-blue-ink: #234e64;
+  --field-lime-ring: #8cae31;
+  --field-camera-well: #121712;
+
+  /* Forest does two jobs: it fills buttons and headers, and it inks links,
+   * bib numbers and split times. One value serves both on a light page; on a
+   * dark one a fill must lift off the canvas while ink must stay legible on
+   * it, which pull in opposite directions. Hence the split. */
+  --field-forest-ink: #1f3325;
+
+  /* The HYFIT mark ships as a white SVG, so the light UI darkens it. */
+  --field-logo-filter: brightness(.18) saturate(.7);
+
+  --field-color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --field-canvas: #0f1311;
+  --field-surface: #171c19;
+  --field-surface-soft: #1d231f;
+  --field-surface-strong: #262d28;
+
+  /* Lightened so a forest-filled button still separates from the canvas. */
+  --field-forest: #2b4a35;
+  --field-forest-hover: #35593f;
+
+  --field-ink: #e9eee9;
+  --field-muted: #9daaa2;
+  --field-faint: #7f8b83;
+  --field-line: #2c3430;
+  --field-line-strong: #3e4842;
+
+  --field-lime: #b8f238;
+  --field-success: #4ea86a;
+  --field-success-soft: #14241a;
+  --field-warning: #d59440;
+  --field-warning-soft: #2a2114;
+  --field-danger: #d9615c;
+  --field-danger-soft: #2c1917;
+  --field-blue: #58a5c9;
+  --field-blue-soft: #12262f;
+
+  /* On a dark page the light shadow disappears; depth comes from a real black. */
+  --field-shadow: 0 10px 30px rgb(0 0 0 / 45%);
+  --field-shadow-raised: 0 18px 50px rgb(0 0 0 / 60%);
+
+  --field-tint-rail: #1c2320;
+  --field-tint-panel: #1e2621;
+  --field-track: #2b332e;
+  --field-track-done: #4d7a5c;
+  --field-line-success: #33543f;
+  --field-line-warning: #6b5427;
+  --field-line-danger: #6e3a36;
+  --field-line-blue: #2d4d5e;
+  --field-on-fill-soft: #cfdad3;
+  --field-warning-ink: #e0b169;
+  --field-blue-ink: #8fc9e2;
+
+  --field-forest-ink: #7ec99a;
+
+  /* The mark is already white — leave it alone. */
+  --field-logo-filter: none;
+
+  --field-color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------ toggle */
+.theme-toggle {
+  align-items: center;
+  background: var(--field-surface);
+  border: 1px solid var(--field-line);
+  border-radius: 100px;
+  color: var(--field-muted);
+  display: inline-flex;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.theme-toggle:hover {
+  border-color: var(--field-line-strong);
+  color: var(--field-ink);
+}
+
+/* The check-in sign-in screen is a centred card on an empty canvas with no
+ * header to hang the toggle off, so it gets its own corner. Without this the
+ * switch is unreachable until you are signed in — which is exactly when a
+ * volunteer on a dark loading bay needs it. */
+.login-theme-corner {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  z-index: 5;
+}
+
+.ops-login { position: relative; }
+
+.theme-toggle svg {
+  display: block;
+  height: 18px;
+  width: 18px;
+}
+
+.theme-toggle span {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 600px) {
+  .theme-toggle span { display: none; }
+  .theme-toggle { padding: 0 11px; }
+}
