@@ -1,4 +1,5 @@
 import { HjudgeRaceSubmitService } from './services/hjudge-race-submit.service';
+import { readRecordFlag } from './hjudge-checkin-rr.util';
 
 /* POST /hyfit-judge/judge/results — a finished race, scored and pushed.
  *
@@ -557,6 +558,107 @@ describe('HjudgeRaceSubmitService', () => {
       await service.submit(EVENT, race);
       expect(valueOf('RaceStatus')).toBe('0');
       expect(valueOf('Status')).toBeUndefined();
+    });
+  });
+
+  describe('statusofathelet — the "has raced" flag', () => {
+    // A DIFFERENT vocabulary from `Status` above, on purpose. This one is a
+    // custom field and a plain yes/no flag, and `buildCheckinRoster` reads it
+    // back through `readRecordFlag` to decide whether an athlete may be claimed
+    // again. Writing a `Status` code into it inverted that read: once
+    // RACE_COMPLETED_STATUS was corrected to '0', every clean finisher was
+    // stamped 0, read back as NOT completed, and handed to the roster as Ready
+    // for a second judge to re-run over the top of the real result.
+    //
+    // So these assert the ROUND TRIP, not just the value: what is written here
+    // has to satisfy the reader that consumes it.
+    const race = {
+      bibs: ['101'],
+      raceMode: 'single' as const,
+      boundaries: soloBoundaries(),
+    };
+
+    /** The flag as the roster reads it back off the participant feed. */
+    const readsAsCompleted = (bib = '101') =>
+      readRecordFlag({ statusofathelet: valueOf('statusofathelet', bib) }, 'statusofathelet');
+
+    it('marks a clean finisher as having raced', async () => {
+      await service.submit(EVENT, race);
+      expect(valueOf('statusofathelet')).toBe('1');
+      expect(readsAsCompleted()).toBe(true);
+    });
+
+    it('is not a copy of Status — the two disagree on a clean finish', async () => {
+      await service.submit(EVENT, race);
+      expect(valueOf('Status')).toBe('0');
+      expect(valueOf('statusofathelet')).toBe('1');
+    });
+
+    it('marks an OOC athlete as having raced too', async () => {
+      // An ICS ends the race. The athlete did not finish the course, but they
+      // are done, and re-running them would overwrite the real record.
+      await service.submit(EVENT, {
+        ...race,
+        stationOutcomes: [
+          { stationNumber: 4, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
+      expect(valueOf('Status')).toBe('1');
+      expect(valueOf('statusofathelet')).toBe('1');
+      expect(readsAsCompleted()).toBe(true);
+    });
+
+    it('is set regardless of ICS and penalties, together on one race', async () => {
+      // The worst race the format allows: a station abandoned, and seconds
+      // added at both stations that can carry them. This field answers ONE
+      // question — did the athlete finish their race — and none of that
+      // changes the answer. Anything that reads it (the roster, the claim
+      // gate) must see the same `1` a clean finisher gets.
+      await service.submit(EVENT, {
+        ...race,
+        contestId: '10',
+        stationOutcomes: [
+          { stationNumber: 2, outcome: 'penalty', penaltySeconds: 120 },
+          { stationNumber: 3, outcome: 'penalty', penaltySeconds: 10 },
+          { stationNumber: 5, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
+      expect(valueOf('statusofathelet')).toBe('1');
+      expect(readsAsCompleted()).toBe(true);
+      // The penalties and the OOC status still land on their own fields —
+      // the flag says "done", the other fields say how it went.
+      expect(valueOf('station2penalty')).toBe('120');
+      expect(valueOf('station3penalty')).toBe('10');
+      expect(valueOf('station5ics')).toBe('1');
+      expect(valueOf('Status')).toBe('1');
+    });
+
+    it('marks both athletes of a pair', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        bibs: ['201', '202'],
+        raceMode: 'doubles',
+      });
+      expect(readsAsCompleted('201')).toBe(true);
+      expect(readsAsCompleted('202')).toBe(true);
+    });
+
+    it('stays set when an explicit status overrides the derivation', async () => {
+      // '3' is DNF on the built-in vocabulary. The race was still handed in.
+      await service.submit(EVENT, { ...race, status: '3' });
+      expect(valueOf('Status')).toBe('3');
+      expect(valueOf('statusofathelet')).toBe('1');
+      expect(readsAsCompleted()).toBe(true);
+    });
+
+    it('honours a renamed field', async () => {
+      rr.loadConfig = jest.fn(async () => ({
+        updateApiUrl: UPDATE_URL,
+        updateMapping: { statusofathelet: 'AthleteDone' },
+      }));
+      await service.submit(EVENT, race);
+      expect(valueOf('AthleteDone')).toBe('1');
+      expect(valueOf('statusofathelet')).toBeUndefined();
     });
   });
 

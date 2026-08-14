@@ -108,6 +108,13 @@ export const updateFieldDefaults = {
   // in. Written alongside `status`, and separately from it, because they are
   // two fields on the RaceResult side and an event may use either, both or
   // neither.
+  //
+  // They do NOT share a vocabulary. `status` is RaceResult's built-in one
+  // (0 = Completed, 1 = OOC, …); this is a custom field and a plain yes/no
+  // flag, `1` once the race has been handed in. It is the field
+  // `buildCheckinRoster` reads to decide whether an athlete has already raced,
+  // so writing a status code into it inverts the roster — see `RACE_HANDED_IN`
+  // in `services/hjudge-race-submit.service.ts`.
   statusofathelet: 'statusofathelet',
 } as const;
 

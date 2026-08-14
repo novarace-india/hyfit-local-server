@@ -87,6 +87,31 @@ const RACE_COMPLETED_STATUS = '0';
 /** See `RACE_COMPLETED_STATUS` — set instead of it when any station is ICS. */
 const RACE_OOC_STATUS = '1';
 
+/**
+ * What `statusofathelet` is set to when a race is handed in.
+ *
+ * NOT the same vocabulary as `Status`, and that is the whole point of it being
+ * a separate constant. `statusofathelet` is a CUSTOM field on the RaceResult
+ * side, and this app defines its meaning: a plain yes/no flag for "this
+ * athlete's race is done", read back off the participant feed by
+ * `buildCheckinRoster` through `readRecordFlag` — where `1` is done and `0` is
+ * still to run.
+ *
+ * The two were written the same value until now, which inverted the flag the
+ * moment `RACE_COMPLETED_STATUS` was corrected to `'0'`: a clean finisher was
+ * stamped `statusofathelet = 0`, read back as NOT completed, and so stayed
+ * claimable — while an OOC athlete got `1` and read as done. That flag is the
+ * only thing standing between a finished race and a second judge re-running it
+ * (`HjudgeJudgeService.claim`), so the inversion handed every clean finisher
+ * back to the roster as Ready.
+ *
+ * `1` for EVERY submission, including OOC and DSQ: the question this field
+ * answers is "has this athlete's race been handed in", not "did they finish
+ * well". A station marked ICS still ends the race, and re-running that athlete
+ * would overwrite the real record field by field.
+ */
+const RACE_HANDED_IN = '1';
+
 /** One RaceResult field, already resolved to that event's spelling. */
 interface FieldWrite {
   key: UpdateFieldKey;
@@ -259,7 +284,10 @@ export class HjudgeRaceSubmitService {
         ? RACE_OOC_STATUS
         : RACE_COMPLETED_STATUS;
     writes.push({ key: 'status', value: completed });
-    writes.push({ key: 'statusofathelet', value: completed });
+    // The completion FLAG, not a copy of the status above — see
+    // `RACE_HANDED_IN`. This is what the roster reads to decide whether an
+    // athlete may be claimed again.
+    writes.push({ key: 'statusofathelet', value: RACE_HANDED_IN });
 
     return writes;
   }
