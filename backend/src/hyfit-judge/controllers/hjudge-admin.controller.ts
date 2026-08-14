@@ -169,6 +169,7 @@ export class HjudgeAdminController {
       role?: string;
       eventId?: string;
       stationNumber?: number;
+      checkinStage?: string | null;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {
@@ -205,6 +206,7 @@ export class HjudgeAdminController {
         pin?: string;
         role?: string;
         stationNumber?: number;
+        checkinStage?: string | null;
       }>;
       eventId?: string;
     },
@@ -233,6 +235,7 @@ export class HjudgeAdminController {
       staffId?: string;
       role?: string;
       eventId?: string;
+      checkinStage?: string | null;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {

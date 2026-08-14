@@ -5,8 +5,10 @@ import { HjudgeDbService } from '../hjudge-db.service';
 import { HjudgeUser } from '../hjudge-auth.guard';
 import {
   HJUDGE_APP_ROLES,
+  HJUDGE_CHECKIN_STAGES,
   HJUDGE_PIN_PATTERN,
   HJUDGE_STAFF_ROLES,
+  HJUDGE_STAGE_ROLES,
 } from '../hjudge-session.util';
 import { HjudgeRaceResultService } from './hjudge-raceresult.service';
 import {
@@ -251,6 +253,7 @@ export class HjudgeAdminService {
     const result = await this.db.q(
       `SELECT id, staff_id AS "staffId", name, role, event_id AS "eventId",
         station_number AS "stationNumber",
+        checkin_stage AS "checkinStage",
         enabled, created_at AS "createdAt"
        FROM users
        WHERE staff_id IS NOT NULL AND (event_id = $1 OR event_id IS NULL)
@@ -258,6 +261,34 @@ export class HjudgeAdminService {
       [eventId],
     );
     return { users: result.rows };
+  }
+
+  // Which shift a person is rostered onto, decided the same way for a create
+  // and for an edit so the two cannot disagree.
+  //
+  // The rules are the database's, enforced here so a slip comes back as a
+  // sentence rather than as a constraint violation: only the two stage names
+  // are stages, and only a volunteer or a standing-in admin can hold one. A
+  // check-in volunteer with nothing said about their stage takes Stage 1 —
+  // what the 081 backfill gave every volunteer who predates the column, and
+  // what the CSV preview promises for a blank cell.
+  private resolveCheckinStage(
+    stage: string | null | undefined,
+    role: string | null | undefined,
+  ): string | null {
+    const value = stage ? String(stage).trim().toUpperCase() : '';
+    if (!value) return role === 'checkin' ? 'STAGE_1_WRISTBAND' : null;
+    if (!HJUDGE_CHECKIN_STAGES.includes(value)) {
+      throw new BadRequestException(
+        `Invalid check-in stage '${stage}' — use STAGE_1_WRISTBAND or STAGE_2_TRANSPONDER`,
+      );
+    }
+    if (!HJUDGE_STAGE_ROLES.includes(String(role ?? ''))) {
+      throw new BadRequestException(
+        `A ${role} cannot be given a check-in stage — only check-in volunteers staff a stage`,
+      );
+    }
+    return value;
   }
 
   async createUser(
@@ -268,23 +299,20 @@ export class HjudgeAdminService {
       role: string;
       eventId?: string;
       stationNumber?: number;
+      checkinStage?: string | null;
     },
     user: HjudgeUser,
     pinHashFn: (pin: string) => string,
   ) {
     const staffId = data.staffId.trim().toUpperCase();
     const name = data.name ? data.name.trim() : staffId;
+    const checkinStage = this.resolveCheckinStage(data.checkinStage, data.role);
 
     const result = await this.db.q<{ id: string }>(
       // No `origin`: that column recorded which of the three merged legacy
       // systems a row came from, and hyfit_v2 has one source — this one.
-      //
-      // No `checkin_stage` either. A counter is no longer a Stage 1 desk or a
-      // Stage 2 desk — it runs whichever stage the athlete in front of it is
-      // due — so there is nothing about a stage to record against a volunteer.
-      // The column is left in place, and left NULL.
-      `INSERT INTO users(staff_id, name, pin_hash, role, event_id, station_number)
-       VALUES($1, $2, $3, $4, $5, $6) RETURNING id`,
+      `INSERT INTO users(staff_id, name, pin_hash, role, event_id, station_number, checkin_stage)
+       VALUES($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [
         staffId,
         name,
@@ -292,6 +320,7 @@ export class HjudgeAdminService {
         data.role,
         data.eventId || user.eventId,
         data.stationNumber || null,
+        checkinStage,
       ],
     );
     await this.audit(
@@ -304,6 +333,7 @@ export class HjudgeAdminService {
         staffId,
         name,
         role: data.role,
+        checkinStage,
       },
     );
     return { id: result.rows[0].id };
@@ -316,6 +346,7 @@ export class HjudgeAdminService {
       pin?: string;
       role?: string;
       stationNumber?: number;
+      checkinStage?: string | null;
     }>,
     user: HjudgeUser,
     pinHashFn: (pin: string) => string,
@@ -347,7 +378,7 @@ export class HjudgeAdminService {
       }
       try {
         await this.createUser(
-          { staffId, name, pin, role, stationNumber },
+          { staffId, name, pin, role, stationNumber, checkinStage: u.checkinStage },
           user,
           pinHashFn,
         );
@@ -373,6 +404,7 @@ export class HjudgeAdminService {
       name?: string;
       staffId?: string;
       role?: string;
+      checkinStage?: string | null;
     },
     user: HjudgeUser,
     pinHashFn: (pin: string) => string,
@@ -383,14 +415,36 @@ export class HjudgeAdminService {
     const staffId = data.staffId ? data.staffId.trim().toUpperCase() : null;
     const name = data.name ? data.name.trim() : null;
 
+    // A stage is only meaningful next to the role that holds it, and an edit
+    // may be moving the person between roles. Reading it off `data.role` is
+    // what the Team screen sends — every edit posts the role it is saving —
+    // and a PATCH that omits the role is one that is not touching either.
+    //
+    // Moving someone off a check-in role takes their stage with them, whether
+    // or not the caller thought to clear it: leaving it would fail the
+    // hyfit_v2_users_stage_role constraint, and the person is off the desk
+    // either way.
+    const leavingTheDesk =
+      Boolean(data.role) && !HJUDGE_STAGE_ROLES.includes(String(data.role));
+    const checkinStage = leavingTheDesk
+      ? null
+      : data.checkinStage === undefined
+        ? undefined
+        : this.resolveCheckinStage(data.checkinStage, data.role ?? 'checkin');
+
     const result = await this.db.q(
-      `UPDATE users SET 
-        enabled = COALESCE($2, enabled), 
+      // 'CLEAR' is the sentinel for "explicitly emptied" in the two nullable
+      // columns an edit can blank, since a bare NULL parameter is how "not
+      // mentioned" arrives. Neither column can hold the literal — station is
+      // an integer, and the stage CHECK allows only the two stage names.
+      `UPDATE users SET
+        enabled = COALESCE($2, enabled),
         station_number = CASE WHEN $3::text = 'CLEAR' THEN NULL WHEN $3::int IS NOT NULL THEN $3::int ELSE station_number END,
         pin_hash = CASE WHEN $4::text IS NULL THEN pin_hash ELSE $4 END,
         name = COALESCE($5, name),
         staff_id = COALESCE($6, staff_id),
         role = COALESCE($7, role),
+        checkin_stage = CASE WHEN $8::text = 'CLEAR' THEN NULL WHEN $8::text IS NOT NULL THEN $8::text ELSE checkin_stage END,
         updated_at = now()
        WHERE id = $1 AND staff_id IS NOT NULL RETURNING id`,
       [
@@ -401,6 +455,7 @@ export class HjudgeAdminService {
         name,
         staffId,
         data.role || null,
+        checkinStage === undefined ? null : (checkinStage ?? 'CLEAR'),
       ],
     );
     if (!result.rowCount) throw new BadRequestException('User not found');
@@ -411,6 +466,7 @@ export class HjudgeAdminService {
       name: data.name,
       staffId: data.staffId,
       role: data.role,
+      checkinStage: checkinStage === undefined ? undefined : checkinStage,
     });
     return { ok: true };
   }

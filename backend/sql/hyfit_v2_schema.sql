@@ -332,7 +332,7 @@ COMMENT ON TABLE  hyfit_v2.users IS
   'Everyone who signs in: field staff by staff ID and PIN, console operators by email and password. One row per person, either credential or both.';
 COMMENT ON COLUMN hyfit_v2.users.password_hash IS 'bcrypt, as written by the admin console';
 COMMENT ON COLUMN hyfit_v2.users.checkin_stage IS
-  'UNUSED. A counter runs whichever hand-over the athlete in front of it is due, read from the equipment mapping table, so nobody staffs a stage. Nothing reads or writes this; new rows leave it NULL. Kept so an existing database needs no migration.';
+  'Rostering only: which shift this person is on, as the Team screen records it. It does not decide what they may hand over — a counter runs whichever hand-over the athlete in front of it is due, read from the equipment mapping table — so no sign-in or check-in consults this column. Volunteers created without one take STAGE_1_WRISTBAND.';
 COMMENT ON COLUMN hyfit_v2.users.pin_hash IS
   'scrypt:<salt>:<hash>, produced by hjudge-session.util.ts hashPin()';
 

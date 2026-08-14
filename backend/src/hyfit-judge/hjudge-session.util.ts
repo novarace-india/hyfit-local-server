@@ -30,10 +30,31 @@ export const HJUDGE_APP_ROLES: string[] = [
 // existing account stays editable; they are simply not roles you can hire into.
 export const HJUDGE_STAFF_ROLES: string[] = ['judge', 'checkin'];
 
-// The two stages of a check-in. Not a property of a volunteer or of a desk any
-// more — a counter runs whichever stage the athlete in front of it is due — so
-// this names the two hand-overs and nothing about who performs them.
+// The two stages of a check-in.
+//
+// Which one happens at the counter is the athlete's to decide — the mapping
+// table says what they already hold, and whatever is left is what they get —
+// so this is not what a volunteer is allowed to hand over. It is what shift
+// they are rostered onto, which is a fact the Team screen records about a
+// person and the counter never consults.
 export type CheckinStage = 'STAGE_1_WRISTBAND' | 'STAGE_2_TRANSPONDER';
+
+// Runtime counterpart to CheckinStage, in the same order as the
+// hyfit_v2_users_checkin_stage_check constraint.
+export const HJUDGE_CHECKIN_STAGES: string[] = [
+  'STAGE_1_WRISTBAND',
+  'STAGE_2_TRANSPONDER',
+];
+
+// Who may hold a stage. A judge with one is a data-entry slip that files a
+// judging account under a check-in shift, so the roles are the same set the
+// hyfit_v2_users_stage_role constraint allows — an admin standing in at a desk
+// is the Help Desk override.
+export const HJUDGE_STAGE_ROLES: string[] = [
+  'checkin',
+  'event_admin',
+  'super_admin',
+];
 
 // A PIN must be 4–8 digits. Enforced identically at login and at every point
 // a PIN is set, so an account can never be saved with a PIN login will refuse.

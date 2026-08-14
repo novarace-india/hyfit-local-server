@@ -474,8 +474,9 @@ export default function TeamPage() {
                                         ))}
                                     </select>
                                     <p className="mt-1 text-[11px] text-fog">
-                                        The stage they open when they sign in to the check-in app. There are no
-                                        named counters to assign — this is the whole assignment.
+                                        The shift they are rostered onto. It does not limit what they can hand
+                                        over: a counter serves whichever hand-over the athlete in front of it is
+                                        due.
                                     </p>
                                 </div>
                             ) : (
@@ -666,17 +667,20 @@ export default function TeamPage() {
 
                                         {u.role === "checkin" && (
                                             stageShort(u.checkinStage) ? (
-                                                // "Stage", not "Counter": there is no counter to be
-                                                // at any more — the stage on the volunteer IS the
-                                                // assignment, and calling it a counter sent people
-                                                // looking for one in the volunteer app.
+                                                // "Stage", not "Counter": the shift is what is
+                                                // recorded here, not a desk to stand at — a counter
+                                                // serves whichever hand-over the athlete is due, and
+                                                // calling this a counter sent people looking for one
+                                                // in the volunteer app.
                                                 <span className="inline-flex items-center gap-1 rounded bg-blue-950/40 border border-blue-800/30 px-2 py-0.5 text-[11px] text-blue-200">
                                                     <span>Stage:</span>
                                                     <span className="font-bold text-blue-300">{stageShort(u.checkinStage)}</span>
                                                 </span>
                                             ) : (
-                                                // A volunteer with no stage can sign in and do nothing, so
-                                                // it is called out rather than left as a blank.
+                                                // Volunteers created since the stage started saving all
+                                                // have one, so a blank is a row that predates it — a
+                                                // hole in the roster, flagged rather than left silent.
+                                                // It does not stop them working a counter.
                                                 <span className="inline-flex items-center gap-1 rounded bg-warn/10 border border-warn/30 px-2 py-0.5 text-[11px] text-warn font-bold">
                                                     No stage set
                                                 </span>
