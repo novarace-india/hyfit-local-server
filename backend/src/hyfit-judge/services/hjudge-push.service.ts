@@ -179,6 +179,11 @@ export class HjudgePushService {
     );
 
     const remoteEvent = handshake?.event ?? {};
+    // The handshake is the authority on the name and the expiry, and for the
+    // URL form it is the ONLY source of them — that form carries neither. So
+    // prefer what prod just said over whatever the paste claimed.
+    const expiresAt =
+      String(handshake?.credential?.expiresAt ?? '') || credential.expiresAt;
     if (remoteEvent.delivery_mode !== 'offline') {
       throw new BadRequestException(
         `"${remoteEvent.name}" is not set to offline delivery on prod`,
@@ -217,7 +222,7 @@ export class HjudgePushService {
         String(remoteEvent.name ?? credential.eventName ?? ''),
         credential.token,
         credential.token.slice(0, 18),
-        credential.expiresAt ?? '',
+        expiresAt ?? '',
       ],
     );
 

@@ -59,6 +59,8 @@ type Target = {
     athletes_pushed_rows: number | null;
     results_pushed_at: string | null;
     results_pushed_rows: number | null;
+    results_stored_at: string | null;
+    results_stored_rows: number | null;
     last_attempt_at: string | null;
     last_status: "ok" | "error" | "skipped" | null;
     last_error: string | null;
@@ -67,7 +69,7 @@ type Target = {
 
 type Run = {
     id: number;
-    kind: "athletes" | "results";
+    kind: "athletes" | "results" | "results_final";
     trigger_source: "manual" | "schedule";
     status: "ok" | "error" | "skipped";
     rows_sent: number;
@@ -114,6 +116,16 @@ const intervalLabel = (minutes: number) =>
  * because the backend's message is the better one. */
 function peekCode(raw: string): { baseUrl: string; eventName: string; expiresAt: string } | null {
     const compact = String(raw ?? "").replace(/\s+/g, "");
+    // The endpoint form carries its host on the face of it; the name and expiry
+    // are not in it and come back from prod on Connect.
+    if (/^https?:\/\//i.test(compact)) {
+        try {
+            const u = new URL(compact);
+            return u.searchParams.get("k") ? { baseUrl: u.origin, eventName: "", expiresAt: "" } : null;
+        } catch {
+            return null;
+        }
+    }
     if (!compact.startsWith("HYFITSYNC1.")) return null;
     try {
         const b64 = compact.slice("HYFITSYNC1.".length).replace(/-/g, "+").replace(/_/g, "/");
@@ -353,6 +365,54 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
     );
 }
 
+/* One endpoint, ready to copy.
+ *
+ * Numbered because the two really are ordered — the roster has to land before
+ * the standings can reference it — and labelled by DESTINATION rather than by
+ * route, because "into the database" and "into Valkey" is the distinction an
+ * operator needs and `/athletes` vs `/results` is not. */
+function EndpointField({
+    step,
+    title,
+    destination,
+    url,
+    copied,
+    onCopy,
+}: {
+    step: string;
+    title: string;
+    destination: string;
+    url: string;
+    copied: boolean;
+    onCopy: () => void;
+}) {
+    return (
+        <div className="rounded-lg border border-smoke bg-ink p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                    <span className="text-xs font-bold uppercase tracking-widest text-fog">
+                        {step} · {title}
+                    </span>
+                    <span className="mt-0.5 block text-xs text-fog">{destination}</span>
+                </div>
+                <button
+                    onClick={onCopy}
+                    className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-onfill"
+                >
+                    {copied ? "Copied" : "Copy URL"}
+                </button>
+            </div>
+            <textarea
+                readOnly
+                value={url}
+                rows={2}
+                onFocus={(e) => e.currentTarget.select()}
+                className="mt-2 w-full break-all rounded-lg border border-smoke bg-coal px-3 py-2 font-mono text-xs outline-none"
+            />
+        </div>
+    );
+}
+
 /* -------------------------------------------------------------------- prod */
 
 function ProdPanel({
@@ -375,7 +435,8 @@ function ProdPanel({
     // not in the state fetched above and cannot be — only its hash was stored —
     // so navigating away is the same as losing it, and the panel says so.
     const [code, setCode] = useState("");
-    const [copied, setCopied] = useState(false);
+    const [urls, setUrls] = useState<{ athletes: string; results: string } | null>(null);
+    const [copied, setCopied] = useState("");
 
     useEffect(() => {
         if (typeof window !== "undefined") setBaseUrl(window.location.origin);
@@ -393,6 +454,15 @@ function ProdPanel({
             // address a venue can actually reach it on — behind a load balancer
             // it sees an internal host. The browser that is already talking to
             // it does know, and the field stays editable for a tunnel or an IP.
+            const origin = baseUrl.replace(/\/+$/, "");
+            // Two endpoints, one credential. An operator setting this up thinks
+            // in terms of "where does the roster go and where do the results
+            // go", and the answer is two different destinations — so it is two
+            // labelled lines to copy, not one with a footnote.
+            const endpoint = (route: string) =>
+                `${origin}/api/hyfit-judge/ingest/events/${created.credential.eventId}/${route}` +
+                `?k=${encodeURIComponent(created.credential.token)}`;
+            setUrls({ athletes: endpoint("athletes"), results: endpoint("results") });
             setCode(
                 "HYFITSYNC1." +
                     base64url(
@@ -405,9 +475,9 @@ function ProdPanel({
                         }),
                     ),
             );
-            setCopied(false);
+            setCopied("");
             setLabel("");
-            return "Connection code created — copy it now, it is not shown again";
+            return "Endpoint created — copy it now, it is not shown again";
         });
 
     const revoke = (id: string, name: string) =>
@@ -495,29 +565,69 @@ function ProdPanel({
                     {busy === "mint" ? "Creating…" : "Create connection code"}
                 </button>
 
-                {code && (
+                {urls && (
                     <div className="mt-4 rounded-lg border border-hyred bg-hyred/10 p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-xs font-bold uppercase tracking-widest text-hyred-ink">
-                                Copy this now — it is not stored and cannot be shown again
-                            </span>
-                            <button
-                                onClick={() => {
-                                    void navigator.clipboard?.writeText(code);
-                                    setCopied(true);
+                        <span className="text-xs font-bold uppercase tracking-widest text-hyred-ink">
+                            Copy these now — they are not stored and cannot be shown again
+                        </span>
+
+                        <div className="mt-3 flex flex-col gap-3">
+                            <EndpointField
+                                step="1"
+                                title="Participants"
+                                destination="into this server's database"
+                                url={urls.athletes}
+                                copied={copied === "athletes"}
+                                onCopy={() => {
+                                    void navigator.clipboard?.writeText(urls.athletes);
+                                    setCopied("athletes");
                                 }}
-                                className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
-                            >
-                                {copied ? "Copied" : "Copy"}
-                            </button>
+                            />
+                            <EndpointField
+                                step="2"
+                                title="Results"
+                                destination="into this server's Valkey, on the venue's interval"
+                                url={urls.results}
+                                copied={copied === "results"}
+                                onCopy={() => {
+                                    void navigator.clipboard?.writeText(urls.results);
+                                    setCopied("results");
+                                }}
+                            />
                         </div>
-                        <textarea
-                            readOnly
-                            value={code}
-                            rows={4}
-                            onFocus={(e) => e.currentTarget.select()}
-                            className="mt-2 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none"
-                        />
+
+                        <p className="mt-3 text-xs text-fog">
+                            Both carry the same credential, so pasting either one into the venue server connects it for
+                            both. The <code>?k=</code> is the key — copy each line whole, and treat it as a password.
+                        </p>
+
+                        {/* The same credential, compact. A long URL with a key
+                            on it survives a chat window less reliably than one
+                            opaque string does. */}
+                        <details className="mt-3 border-t border-smoke pt-3">
+                            <summary className="cursor-pointer text-xs font-bold uppercase tracking-widest text-fog">
+                                Or copy it as a short code instead
+                            </summary>
+                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-xs text-fog">Same credential, one opaque string.</span>
+                                <button
+                                    onClick={() => {
+                                        void navigator.clipboard?.writeText(code);
+                                        setCopied("code");
+                                    }}
+                                    className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
+                                >
+                                    {copied === "code" ? "Copied" : "Copy code"}
+                                </button>
+                            </div>
+                            <textarea
+                                readOnly
+                                value={code}
+                                rows={3}
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="mt-1.5 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none"
+                            />
+                        </details>
                     </div>
                 )}
             </section>
@@ -616,13 +726,19 @@ function LocalPanel({
             return `Prod answered for "${seen.remote.event.name}" — it holds ${seen.remote.counts.athletes} athletes and ${seen.remote.counts.results} results`;
         });
 
-    const push = (kind: "athletes" | "results") =>
+    const push = (kind: "athletes" | "results" | "results_final") =>
         act(`push:${kind}`, async () => {
             const done = await judgeApi<{ status: string; rows: number; chunks: number; durationMs: number }>(
                 scoped("/admin/sync/push"),
                 { method: "POST", body: JSON.stringify({ kind }) },
             );
-            return `${done.rows} ${kind === "athletes" ? "athlete" : "result"} row(s) pushed in ${done.chunks} request(s), ${done.durationMs}ms`;
+            const what =
+                kind === "athletes"
+                    ? "athlete row(s) pushed"
+                    : kind === "results_final"
+                      ? "result row(s) written to prod's database"
+                      : "result row(s) pushed to prod's cache";
+            return `${done.rows} ${what} in ${done.chunks} request(s), ${done.durationMs}ms`;
         });
 
     const configure = (patch: {
@@ -654,17 +770,23 @@ function LocalPanel({
             <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
                 <h2 className="text-sm font-bold uppercase tracking-wide">Connect to prod</h2>
                 <p className="mt-1 text-xs text-fog">
-                    Paste the connection code from prod&apos;s Sync screen for the matching event, and check the server
-                    address it is pointing at. Nothing is stored until prod confirms which event the code opens.
+                    Paste the push endpoint prod gave you for this event, and check the server address it is pointing
+                    at. Nothing is stored until prod confirms which event it opens.
                 </p>
 
                 <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">1 · Connection code</span>
+                    <span className="font-bold uppercase tracking-widest text-fog">
+                        1 · Push endpoint from prod
+                    </span>
+                    <span className="mt-0.5 block text-fog">
+                        Either of the two prod gave you — participants or results. They share one credential, so one
+                        paste connects this server for both.
+                    </span>
                     <textarea
                         value={code}
                         onChange={(e) => setCode(e.target.value)}
                         rows={4}
-                        placeholder="HYFITSYNC1.…"
+                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…?k=…"
                         className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
                     />
                 </label>
@@ -684,24 +806,23 @@ function LocalPanel({
                     />
                     <span className="mt-1 block text-fog">
                         {peek?.baseUrl && !baseUrl.trim()
-                            ? `Taken from the code. Leave it as it is unless this venue reaches prod another way.`
+                            ? "Taken from the endpoint above. Leave it unless this venue reaches prod another way."
                             : "The origin only — no path. This server must be able to reach it."}
                     </span>
                 </label>
 
                 {peek && (
                     <div className="mt-3 rounded-lg border border-smoke bg-ink p-3 text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">This code says</span>
-                        <p className="mt-1 text-chalk">
-                            {peek.eventName || "an unnamed event"}
-                            {peek.expiresAt ? ` · expires ${when(peek.expiresAt)}` : ""}
-                        </p>
-                        <p className="mt-1 break-all font-mono text-fog">
-                            {effectiveUrl}/api/hyfit-judge/ingest/events/…/athletes
-                        </p>
+                        <span className="font-bold uppercase tracking-widest text-fog">This will push to</span>
+                        <p className="mt-1 break-all font-mono text-chalk">{effectiveUrl}</p>
+                        {peek.eventName && (
+                            <p className="mt-1 text-chalk">
+                                {peek.eventName}
+                                {peek.expiresAt ? ` · expires ${when(peek.expiresAt)}` : ""}
+                            </p>
+                        )}
                         <p className="mt-1 text-fog">
-                            Prod will confirm the event name when you press Connect. Check it matches the race in front
-                            of you.
+                            Prod will name the event when you press Connect. Check it matches the race in front of you.
                         </p>
                     </div>
                 )}
@@ -829,10 +950,14 @@ function LocalPanel({
                 </div>
 
                 <div className="rounded-xl border border-smoke bg-coal p-4">
-                    <h3 className="text-sm font-bold uppercase tracking-wide">Results</h3>
+                    <h3 className="text-sm font-bold uppercase tracking-wide">Results → prod&apos;s cache</h3>
                     <p className="mt-1 text-xs text-fog">
-                        {state.counts.results} stored on this server · last pushed {ago(target.results_pushed_at)}
+                        {state.counts.results} on this server · last pushed {ago(target.results_pushed_at)}
                         {target.results_pushed_rows != null ? ` (${target.results_pushed_rows} rows)` : ""}
+                    </p>
+                    <p className="mt-2 text-xs text-fog">
+                        Goes into prod&apos;s Valkey, under the key its live-results mode already reads. Fast, and
+                        provisional by design — it expires and every push replaces it.
                     </p>
 
                     <label className="mt-3 block text-xs">
@@ -852,7 +977,7 @@ function LocalPanel({
                     </label>
                     <p className="mt-1 text-xs text-fog">
                         The timer runs on this server, not in this browser — closing the console does not stop it. A
-                        scheduled push that would send standings prod already has is skipped.
+                        push that would send standings prod already has is skipped.
                     </p>
 
                     {/* Without this the timer re-sends the same stored snapshot
@@ -897,6 +1022,33 @@ function LocalPanel({
                         </button>
                     </div>
                 </div>
+            </section>
+
+            {/* The end of the day. A cache is allowed to lose things; this is
+                the act that makes the standings answerable tomorrow. */}
+            <section className="mt-4 rounded-xl border border-smoke bg-coal p-4">
+                <h3 className="text-sm font-bold uppercase tracking-wide">Final standings → prod&apos;s database</h3>
+                <p className="mt-1 text-xs text-fog">
+                    {target.results_stored_at
+                        ? `Last written ${ago(target.results_stored_at)}${
+                              target.results_stored_rows != null ? ` (${target.results_stored_rows} rows)` : ""
+                          }`
+                        : "Never written — nothing published here survives prod's cache expiring"}
+                </p>
+                <p className="mt-2 max-w-prose text-xs text-fog">
+                    Everything above goes into prod&apos;s Valkey, which expires twelve hours after the last push. Press
+                    this once the race is scored and the standings are written to prod&apos;s tables instead — which is
+                    what the history page, the scorecard and the certificates read. Prod then serves them by switching
+                    its Results mode from <span className="font-bold text-chalk">live</span> to{" "}
+                    <span className="font-bold text-chalk">stored</span>.
+                </p>
+                <button
+                    onClick={() => void push("results_final")}
+                    disabled={!!busy}
+                    className="mt-3 rounded-lg border border-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-hyred-ink disabled:opacity-40"
+                >
+                    {busy === "push:results_final" ? "Writing to prod…" : "Publish final standings to prod"}
+                </button>
             </section>
 
             <RunHistory runs={state.runs} />

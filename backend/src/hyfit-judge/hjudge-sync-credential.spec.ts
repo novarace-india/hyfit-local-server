@@ -2,6 +2,7 @@ import {
   chunkByBytes,
   decodeSyncCredential,
   encodeSyncCredential,
+  encodeSyncUrl,
   normaliseBaseUrl,
   HJUDGE_CREDENTIAL_PREFIX,
 } from './hjudge-sync-credential.util';
@@ -54,6 +55,63 @@ describe('sync connection codes', () => {
     expect(() =>
       decodeSyncCredential(JSON.stringify({ ...credential, baseUrl: '' })),
     ).toThrow(/no server address/i);
+  });
+
+  // The endpoint form: what prod's console leads with, and what an operator is
+  // most likely to actually paste.
+  describe('the endpoint URL form', () => {
+    it('round-trips the parts that matter', () => {
+      const back = decodeSyncCredential(encodeSyncUrl(credential));
+      expect(back.baseUrl).toBe(credential.baseUrl);
+      expect(back.eventId).toBe(credential.eventId);
+      expect(back.token).toBe(credential.token);
+      // Neither is carried by a URL; `bind` takes both from the handshake,
+      // which is the authority on them in any case.
+      expect(back.eventName).toBe('');
+      expect(back.expiresAt).toBe('');
+    });
+
+    // Prod hands out two: one per destination. Either must bind the same
+    // target, because they are two routes on one credential — not two keys.
+    it('accepts either of the two endpoints prod publishes', () => {
+      const athletes = encodeSyncUrl(credential, 'athletes');
+      const results = encodeSyncUrl(credential, 'results');
+
+      expect(athletes).toContain('/athletes?k=');
+      expect(results).toContain('/results?k=');
+
+      const a = decodeSyncCredential(athletes);
+      const r = decodeSyncCredential(results);
+      expect(a).toEqual(r);
+      expect(a.eventId).toBe(credential.eventId);
+      expect(a.token).toBe(credential.token);
+      expect(a.baseUrl).toBe(credential.baseUrl);
+    });
+
+    it('reads the bare event endpoint too', () => {
+      const bare = encodeSyncUrl(credential);
+      expect(bare).not.toContain('/athletes');
+      expect(decodeSyncCredential(bare).eventId).toBe(credential.eventId);
+    });
+
+    it('keeps a non-default port', () => {
+      const local = { ...credential, baseUrl: 'http://192.168.1.20:3001' };
+      expect(decodeSyncCredential(encodeSyncUrl(local)).baseUrl).toBe(
+        'http://192.168.1.20:3001',
+      );
+    });
+
+    // The half-copied paste: everything up to the query string. It looks
+    // complete, and it is useless, so it has to say which half is missing.
+    it('names the missing credential when the ?k= was left behind', () => {
+      const truncated = encodeSyncUrl(credential).split('?')[0];
+      expect(() => decodeSyncCredential(truncated)).toThrow(/\?k=/);
+    });
+
+    it('survives a token with characters that need escaping', () => {
+      const odd = { ...credential, token: 'hyfitsync_a+b/c=d e' };
+      expect(decodeSyncCredential(encodeSyncUrl(odd)).token).toBe(odd.token);
+    });
   });
 
   it('rejects a truncated code as damaged', () => {
