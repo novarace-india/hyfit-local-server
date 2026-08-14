@@ -55,6 +55,11 @@ export class HjudgeParticipantSyncService {
         contestId: person.contestId,
         wave: person.wave,
         club: person.club,
+        // Same field, same reason as `shape()` in hjudge-judge.service.ts: an
+        // athlete picked off the cached roster has to carry the date an
+        // athlete resolved by wristband does, or the app sees it appear and
+        // disappear depending on how the judge found them.
+        dateOfBirth: person.dateOfBirth,
         // The app's own names for these; RaceResult's spellings are internal to
         // the lookup and must not leak into the roster the tablets cache.
         wristbandId: person.wristbandCode,

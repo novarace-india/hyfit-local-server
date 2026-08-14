@@ -451,3 +451,63 @@ describe('release', () => {
     ).rejects.toThrow(/was not found/);
   });
 });
+
+describe('date of birth on a resolved athlete', () => {
+  // The app has read `dateOfBirth` off this response since the Participant
+  // model was written, and the import has parsed `DateOfBirth` off the feed for
+  // just as long — but `shape()` never passed it between the two, so the field
+  // was empty on every athlete the tablet resolved.
+  //
+  // The rows here carry the real feed's spelling and value format, taken from
+  // the event's own participant endpoint: `"DateOfBirth":"1982-08-15"`.
+  it('is returned in ISO form', async () => {
+    const { service } = fake([row({ DateOfBirth: '1982-08-15' })]);
+    const result = await new HjudgeJudgeService(service as any).resolveWristband(
+      EVENT,
+      'WB-5502',
+    );
+    expect(result?.participant.dateOfBirth).toBe('1982-08-15');
+  });
+
+  it('is returned for the partner of a doubles pair too', async () => {
+    // Contest 9 is a doubles contest, so the second athlete comes back as the
+    // teammate — shaped by the same `shape()` and just as much use to the app.
+    const { service } = fake([
+      row({ Bib: 9001, ContestID: 9, DateOfBirth: '1982-08-15' }),
+      row({
+        Bib: 9002,
+        ContestID: 9,
+        DateOfBirth: '2013-08-15',
+        wristbandid: 'WB-5503',
+        Transponder1: 'TR-8802',
+      }),
+    ]);
+    const result = await new HjudgeJudgeService(service as any).resolveWristband(
+      EVENT,
+      'WB-5502',
+    );
+    expect(result?.participant.dateOfBirth).toBe('1982-08-15');
+    expect(result?.teammate?.dateOfBirth).toBe('2013-08-15');
+  });
+
+  it('is blank rather than a guess when the feed has no usable date', async () => {
+    // `normalizeDateOfBirth` takes ISO or nothing. A date the roster wrote in
+    // some other order cannot be told apart from a valid one (03/04 is two
+    // different days), and a wrong DOB is worse than a missing one.
+    const { service } = fake([row({ DateOfBirth: '15/08/1982' })]);
+    const result = await new HjudgeJudgeService(service as any).resolveWristband(
+      EVENT,
+      'WB-5502',
+    );
+    expect(result?.participant.dateOfBirth).toBe('');
+  });
+
+  it('is blank when the feed carries no date column at all', async () => {
+    const { service } = fake([row()]);
+    const result = await new HjudgeJudgeService(service as any).resolveWristband(
+      EVENT,
+      'WB-5502',
+    );
+    expect(result?.participant.dateOfBirth).toBe('');
+  });
+});

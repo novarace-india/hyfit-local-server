@@ -255,6 +255,13 @@ export class HjudgeJudgeService {
       contestId: entry.person.contestId,
       wave: entry.person.wave,
       club: entry.person.club,
+      // The feed carries `DateOfBirth` and the import has parsed it into
+      // `person.dateOfBirth` since this util was written — it just never made
+      // it into the shape, so the tablet's `Participant.dateOfBirth` (which has
+      // always read this key) was empty for every athlete resolved by band.
+      // ISO `YYYY-MM-DD`, or '' where the roster has no usable date:
+      // `normalizeDateOfBirth` refuses to guess at anything else.
+      dateOfBirth: entry.person.dateOfBirth,
       wristbandId: entry.person.wristbandCode,
       transponder1: entry.person.transponderCode,
       stage2Ready: Boolean(entry.stages.STAGE_2_TRANSPONDER),
