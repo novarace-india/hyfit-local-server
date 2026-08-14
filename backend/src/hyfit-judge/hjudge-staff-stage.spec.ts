@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { HjudgeAdminService } from './services/hjudge-admin.service';
-import type { HjudgeUser } from './hjudge-auth.guard';
+import { HjudgeCheckinAuthGuard, type HjudgeUser } from './hjudge-auth.guard';
+import { hjudgeConfig } from './hjudge.config';
+import { tokenHash } from './hjudge-session.util';
 
 /* The check-in stage on a staff row — which shift a volunteer is rostered onto,
  * as the Team screen sets it.
@@ -29,6 +31,7 @@ const actor: HjudgeUser = {
   eventId: EVENT,
   boundEventId: null,
   platformEventId: null,
+  checkinStage: null,
   sessionId: 's1',
   deviceLabel: '',
   ipAddress: '',
@@ -227,6 +230,100 @@ describe('check-in stage on a staff row', () => {
       const { service, write } = serviceWithCapture();
       await service.listUsers(EVENT);
       expect(write('FROM users').sql).toContain('checkin_stage AS "checkinStage"');
+    });
+  });
+
+  /* The other half of the trip: the Team screen writes the shift, and the
+   * counter has to be able to see it. That is one hop — the guard reads it out
+   * of `users` on every request, so a volunteer re-rostered mid-shift picks the
+   * change up on their next call rather than at their next sign-in. */
+  describe('carrying it to the counter', () => {
+    const TOKEN = 'counter-token';
+
+    function guardWithSession(row: Record<string, unknown> | null) {
+      const seen: string[] = [];
+      const db = {
+        q: async (sql: string) => {
+          seen.push(sql);
+          return sql.includes('FROM sessions')
+            ? { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+            : { rows: [], rowCount: 0 };
+        },
+      };
+      const request: any = {
+        headers: { cookie: `${hjudgeConfig.checkinCookieName}=${TOKEN}` },
+      };
+      const context = {
+        switchToHttp: () => ({
+          getRequest: () => request,
+          getResponse: () => ({}),
+        }),
+      } as any;
+      return {
+        guard: new HjudgeCheckinAuthGuard(db as any),
+        context,
+        request,
+        sessionSql: () => seen.find((sql) => sql.includes('FROM sessions'))!,
+      };
+    }
+
+    const sessionRow = (stage: string | null) => ({
+      id: 'u-1',
+      staffId: 'VOL-01',
+      name: 'Priya',
+      role: 'checkin',
+      eventId: EVENT,
+      boundEventId: EVENT,
+      platformEventId: null,
+      checkinStage: stage,
+      sessionId: 's-1',
+      deviceLabel: '',
+      ipAddress: '',
+    });
+
+    it('asks the session query for the stage', async () => {
+      const { guard, context, sessionSql } = guardWithSession(
+        sessionRow('STAGE_2_TRANSPONDER'),
+      );
+      await guard.canActivate(context);
+      expect(sessionSql()).toContain('u.checkin_stage AS "checkinStage"');
+      // Read live from `users`, not stored on the session row — which is what
+      // makes a re-rostering land without a re-login.
+      expect(sessionSql()).toContain('JOIN users u ON u.id = s.user_id');
+    });
+
+    it('puts the stage on the request the counter routes read', async () => {
+      const { guard, context, request } = guardWithSession(
+        sessionRow('STAGE_2_TRANSPONDER'),
+      );
+      await guard.canActivate(context);
+      expect(request.hjudgeUser.checkinStage).toBe('STAGE_2_TRANSPONDER');
+    });
+
+    it('carries a null through for anyone unrostered', async () => {
+      const { guard, context, request } = guardWithSession(sessionRow(null));
+      await guard.canActivate(context);
+      expect(request.hjudgeUser.checkinStage).toBeNull();
+    });
+
+    it('looks the session up by the counter cookie and audience', async () => {
+      const seen: unknown[][] = [];
+      const db = {
+        q: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes('FROM sessions')) seen.push(params);
+          return { rows: [sessionRow('STAGE_1_WRISTBAND')], rowCount: 1 };
+        },
+      };
+      const request: any = {
+        headers: { cookie: `${hjudgeConfig.checkinCookieName}=${TOKEN}` },
+      };
+      await new HjudgeCheckinAuthGuard(db as any).canActivate({
+        switchToHttp: () => ({
+          getRequest: () => request,
+          getResponse: () => ({}),
+        }),
+      } as any);
+      expect(seen[0]).toEqual([tokenHash(TOKEN), 'checkin']);
     });
   });
 });

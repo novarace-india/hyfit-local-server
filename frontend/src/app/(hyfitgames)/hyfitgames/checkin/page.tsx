@@ -23,6 +23,10 @@ type CheckinWindow = { state: "off"|"no_slot"|"early"|"open"|"late"; allowed: bo
 type ParticipantResult = { participant: Person; window: CheckinWindow; assignment: Assignment; nextStage: StageType | null; teammates: Teammate[]; teamWarning: string | null };
 type CheckinContext = {
   volunteer: { id: string; staffId: string; name: string };
+  // The shift this volunteer was rostered onto, for the header to name. It does
+  // not limit the counter: what is handed over is decided per athlete, by what
+  // they already hold, so this is who is on duty and not what they may do.
+  stage: StageType | null;
   // Whether this event's RaceResult endpoints are set up. The mapping table is
   // now as load-bearing as the participant feed — it is what says what an
   // athlete already holds — so its health is reported beside it.
@@ -197,7 +201,13 @@ export default function CheckinPage() {
   if (checkingSession) return <main className="ops-login checkin-login"><div className="login-theme-corner"><ThemeToggle /></div><div className="ops-login-card"><Image src="/branding/hyfit-games-2026-white.svg" width={90} height={90} unoptimized alt="HYFIT"/><div className="ops-kicker">VOLUNTEER OPERATIONS</div><h1>Restoring your counter…</h1></div></main>;
   if (!loggedIn) return <main className="ops-login checkin-login"><div className="login-theme-corner"><ThemeToggle /></div><div className="ops-login-card"><Image src="/branding/hyfit-games-2026-white.svg" width={90} height={90} unoptimized alt="HYFIT"/><div className="ops-kicker">VOLUNTEER OPERATIONS</div><h1>Check-in sign in</h1><input placeholder="Staff ID" value={credentials.staffId} onChange={(event)=>setCredentials({...credentials,staffId:event.target.value})}/><input type="password" inputMode="numeric" placeholder="PIN" value={credentials.pin} onChange={(event)=>setCredentials({...credentials,pin:event.target.value})}/><button onClick={signIn}>Open my counter</button><p className="ops-signin-note">Use the staff ID and PIN issued for your counter shift. Judging signs in separately, in the judge app.</p>{message&&<p className="ops-error">{message}</p>}</div></main>;
 
-  const stageLabel = !result ? "CHECK-IN COUNTER" : stageOne ? "STAGE 1 · WRISTBAND" : stageType ? "STAGE 2 · TRANSPONDER" : "NOTHING LEFT TO ISSUE";
+  // Between athletes the header names the shift on duty; with one loaded it
+  // names what that athlete is due, which is the counter's actual job and so
+  // outranks it. "SHIFT", not a stage on its own, because this desk is not
+  // limited to it — a Stage 1 volunteer still hands a transponder to an athlete
+  // who is due one.
+  const shiftLabel = context?.stage === "STAGE_1_WRISTBAND" ? "STAGE 1 SHIFT" : context?.stage === "STAGE_2_TRANSPONDER" ? "STAGE 2 SHIFT" : "";
+  const stageLabel = !result ? (shiftLabel ? `CHECK-IN COUNTER · ${shiftLabel}` : "CHECK-IN COUNTER") : stageOne ? "STAGE 1 · WRISTBAND" : stageType ? "STAGE 2 · TRANSPONDER" : "NOTHING LEFT TO ISSUE";
   const shellStage = stageType === "STAGE_2_TRANSPONDER" ? "stage-two" : "stage-one";
   const participant = result?.participant;
   if (receipt) return <main className={`checkin-shell stage-shell ${receipt.stageType === "STAGE_2_TRANSPONDER" ? "stage-two" : "stage-one"}`}>

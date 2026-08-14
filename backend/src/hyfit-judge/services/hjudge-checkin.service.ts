@@ -203,8 +203,20 @@ export class HjudgeCheckinService {
     return this.present(entry, config, eventId, assignments);
   }
 
-  /** Who this volunteer is, and everything that decides whether their counter
-   *  can work at all. No stage: the athlete decides that now, one at a time. */
+  /**
+   * Who this volunteer is, and everything that decides whether their counter
+   * can work at all.
+   *
+   * `stage` is the shift the Team screen rostered them onto, and it is here to
+   * be shown, not obeyed: the counter still runs whichever hand-over the
+   * athlete in front of it is due — `nextStage` on the participant lookup —
+   * because the equipment they already hold is the only thing that can say what
+   * is left to give them. A volunteer with no stage, or one rostered to Stage 1
+   * standing at a transponder desk, works exactly as before.
+   *
+   * It is reported because a tablet that cannot say whose shift it is signed in
+   * to is a tablet nobody can hand over at the end of one.
+   */
   async getContext(user: HjudgeUser) {
     const config = await this.rr.loadConfig(user.eventId!);
 
@@ -233,6 +245,10 @@ export class HjudgeCheckinService {
 
     return {
       volunteer: { id: user.id, staffId: user.staffId, name: user.name },
+      // Top level rather than on `volunteer`, because that is the key the
+      // counter clients already read — one place for it, so there is no second
+      // copy to disagree with this one.
+      stage: user.checkinStage ?? null,
       integration: {
         configured: this.rr.isConfigured(config),
         canWrite: this.rr.canWrite(config),

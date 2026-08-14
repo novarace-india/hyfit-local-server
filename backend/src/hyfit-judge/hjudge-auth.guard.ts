@@ -25,6 +25,13 @@ export interface HjudgeUser {
    *  a device provisioned before the cutover — whose config code holds that id
    *  — is still recognised as being set up for this event. */
   platformEventId: string | null;
+  /** Which check-in shift this person is rostered onto, as the Team screen set
+   *  it. Reported to the counter so a volunteer can see whose shift the tablet
+   *  is signed in to; it decides nothing. What is handed over is the athlete's
+   *  to determine — whichever of the two they have not had — so no route reads
+   *  this to permit or refuse a check-in. Null for a judge, for an admin
+   *  standing in, and for a volunteer nobody has rostered yet. */
+  checkinStage: string | null;
   sessionId: string;
   deviceLabel: string;
   ipAddress: string;
@@ -79,7 +86,7 @@ export class HjudgeAuthGuard implements CanActivate {
     const result = await this.db.q<HjudgeUser>(
       `SELECT u.id, u.staff_id AS "staffId", u.name, u.role,
         COALESCE(u.event_id, (SELECT e.id FROM events e WHERE e.is_active)) AS "eventId",
-        u.event_id AS "boundEventId",
+        u.event_id AS "boundEventId", u.checkin_stage AS "checkinStage",
         (SELECT ev.platform_event_id FROM events ev
           WHERE ev.id = COALESCE(u.event_id, (SELECT e2.id FROM events e2 WHERE e2.is_active)))
           AS "platformEventId",

@@ -720,7 +720,7 @@ describe('HjudgeCheckinService', () => {
   });
 
   describe('getContext', () => {
-    it('reports the volunteer and the endpoints, and no stage', async () => {
+    it('reports the volunteer and the endpoints', async () => {
       feed([athlete()]);
       const context = await service.getContext(counter());
 
@@ -731,7 +731,39 @@ describe('HjudgeCheckinService', () => {
       expect(context.integration.mappingReadable).toBe(true);
       expect(context.integration.publishesWristband).toBe(true);
       expect(context.integration.publishesTransponder).toBe(true);
-      expect('stage' in context).toBe(false);
+    });
+
+    it('reports the shift the volunteer is rostered onto', async () => {
+      feed([athlete()]);
+      const context = await service.getContext(
+        counter({ checkinStage: 'STAGE_2_TRANSPONDER' }),
+      );
+      expect(context.stage).toBe('STAGE_2_TRANSPONDER');
+    });
+
+    it('reports null for a volunteer nobody has rostered', async () => {
+      feed([athlete()]);
+      expect((await service.getContext(counter())).stage).toBeNull();
+    });
+
+    it('reports the shift without letting it limit the counter', async () => {
+      // The whole point of the field: it is shown, not obeyed. A Stage 1
+      // volunteer still completes the transponder hand-over for an athlete who
+      // is due one, because what is left to give is the athlete's fact, not
+      // the volunteer's. If this ever fails, the counter has started refusing
+      // work on the strength of a rostering label.
+      feed([athlete({ wristbandid: 'A-11111' })]);
+      const stage1Volunteer = counter({ checkinStage: 'STAGE_1_WRISTBAND' });
+
+      const lookup = await service.getParticipant(EVENT, { bib: '11651' });
+      expect(lookup?.nextStage).toBe('STAGE_2_TRANSPONDER');
+
+      await expect(
+        service.completeStage(
+          { bib: '11651', stageType: 'STAGE_2_TRANSPONDER', assetCode: 'T-900' },
+          stage1Volunteer,
+        ),
+      ).resolves.toBeDefined();
     });
 
     it('says so when the mapping table is missing an asset column', async () => {
