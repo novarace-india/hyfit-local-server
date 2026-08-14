@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { HjudgeDbService } from '../hjudge-db.service';
@@ -64,6 +65,31 @@ export type ResultRow = {
   station_ms: (number | null)[];
   penalties: Record<string, string>;
 };
+
+/** One `results` row, as its columns come out of Postgres or off the wire,
+ *  turned into the shape every reader of this module expects. Shared by the
+ *  stored read and by the ingest path so the two cannot drift. */
+function rowFromColumns(r: Record<string, any>): ResultRow {
+  return {
+    bib: r.bib,
+    name: r.name,
+    category: r.category ?? null,
+    club: r.club ?? null,
+    status: r.status,
+    rank: r.rank ?? null,
+    age_group_rank: r.age_group_rank ?? null,
+    total_ms: numeric(r.total_ms),
+    team_time_ms: numeric(r.team_time_ms),
+    cog_ms: numeric(r.cog_ms),
+    run_ms: [r.run1_ms, r.run2_ms, r.run3_ms, r.run4_ms, r.run5_ms, r.run6_ms].map(
+      numeric,
+    ),
+    station_ms: [r.st1_ms, r.st2_ms, r.st3_ms, r.st4_ms, r.st5_ms, r.st6_ms].map(
+      numeric,
+    ),
+    penalties: r.penalties ?? {},
+  };
+}
 
 export type ResultsPayload = {
   event_id: string;
@@ -733,36 +759,65 @@ export class HjudgeResultsService {
       fetched_at: event.results_stored_at ?? new Date().toISOString(),
       source_count: rows.length,
       rejected: 0,
-      rows: rows.map((r) => ({
-        bib: r.bib,
-        name: r.name,
-        category: r.category,
-        club: r.club,
-        status: r.status,
-        rank: r.rank,
-        age_group_rank: r.age_group_rank,
-        total_ms: numeric(r.total_ms),
-        team_time_ms: numeric(r.team_time_ms),
-        cog_ms: numeric(r.cog_ms),
-        run_ms: [
-          r.run1_ms,
-          r.run2_ms,
-          r.run3_ms,
-          r.run4_ms,
-          r.run5_ms,
-          r.run6_ms,
-        ].map(numeric),
-        station_ms: [
-          r.st1_ms,
-          r.st2_ms,
-          r.st3_ms,
-          r.st4_ms,
-          r.st5_ms,
-          r.st6_ms,
-        ].map(numeric),
-        penalties: r.penalties ?? {},
-      })),
+      rows: rows.map(rowFromColumns),
     };
+  }
+
+  /**
+   * Publish standings that arrived from somewhere other than RaceResult.
+   *
+   * This exists for ONE caller: `HjudgeIngestService`, receiving an offline
+   * event's standings pushed up from the venue. It is here rather than there
+   * because the live key belongs to this service — its name, its TTL, its
+   * payload shape and the read-back check are four things that must agree, and
+   * the last time this codebase kept one fact in two places it cost a cutover.
+   *
+   * The rows arrive in `results` COLUMN shape, which is what the venue's table
+   * holds, and go through the same `rowFromColumns` the stored read uses. So a
+   * pushed live payload and a locally stored one are the same object with a
+   * different provenance, and the public read cannot tell them apart — which is
+   * the whole point.
+   */
+  async publishLiveRows(
+    eventId: string,
+    rows: Record<string, any>[],
+  ): Promise<{ key: string; rows: number; fetchedAt: string }> {
+    const event = await this.event(eventId);
+    const key = this.liveKey(event);
+    const fetchedAt = new Date().toISOString();
+
+    const payload: ResultsPayload = {
+      event_id: eventId,
+      event_name: event.name,
+      source: 'live',
+      // No URL: these standings were not fetched from anywhere by this server.
+      url: null,
+      fetched_at: fetchedAt,
+      source_count: rows.length,
+      rejected: 0,
+      rows: rows.map(rowFromColumns),
+    };
+
+    await this.cache.set(key, payload, LIVE_TTL_SECONDS);
+
+    // Read it back, for exactly the reason `pull()` does: CacheService.set
+    // SWALLOWS a dead Valkey — it logs and returns — so without this a push
+    // into a cache that is not there would report success, the venue would see
+    // a green tick, and the public page would serve nothing at all. Live mode
+    // is entirely Valkey; if the write did not land, the sender has to be told.
+    const stored = await this.cache
+      .get<ResultsPayload>(key)
+      .catch(() => null);
+    if (!stored?.rows?.length) {
+      throw new ServiceUnavailableException(
+        `Standings were accepted but did not survive the cache at ${key} — Valkey is unreachable on this server, so live results cannot be published.`,
+      );
+    }
+
+    this.logger.log(
+      `Live standings published for ${event.name}: ${rows.length} rows -> ${key}`,
+    );
+    return { key, rows: rows.length, fetchedAt };
   }
 
   // ──────────────────────────────────────────────────────────────── plumbing

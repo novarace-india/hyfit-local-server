@@ -598,6 +598,7 @@ export class HjudgeAdminController {
       intervalMinutes?: number;
       enabled?: boolean;
       autoImportResults?: boolean;
+      baseUrl?: string;
       eventId?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
@@ -636,6 +637,11 @@ export class HjudgeAdminController {
     if (kind === 'athletes') return this.push.pushAthletes(scoped, 'manual');
     if (kind === 'results')
       return this.push.pushResults(scoped, 'manual', { force: true });
-    throw new BadRequestException('Push either athletes or results');
+    // The end-of-day act: the standings into prod's tables rather than its
+    // cache, so they are still there tomorrow. See pushFinalResults.
+    if (kind === 'results_final') return this.push.pushFinalResults(scoped, 'manual');
+    throw new BadRequestException(
+      'Push athletes, results, or results_final',
+    );
   }
 }

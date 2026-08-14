@@ -4,10 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { HjudgeDbService } from '../hjudge-db.service';
 import { HjudgeCacheService } from '../hjudge-cache.service';
+import { HjudgeResultsService } from './hjudge-results.service';
 import { tokenHash } from '../hjudge-session.util';
 import {
   HJUDGE_INGEST_SCOPES,
@@ -84,9 +86,16 @@ export interface IngestChunk<TRow> {
   seq?: number;
   rows?: TRow[];
   final?: boolean;
+  /** Results only. See `ingestResults`. */
+  destination?: 'cache' | 'store';
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** How long a half-delivered live push may sit in the cache waiting for its
+ *  last chunk. Long enough for a venue link to stall and recover mid-push,
+ *  short enough that an abandoned push is not still there next race. */
+const STAGE_TTL_SECONDS = 15 * 60;
 
 /**
  * The receiving half of an offline event.
@@ -128,6 +137,10 @@ export class HjudgeIngestService {
   constructor(
     private readonly db: HjudgeDbService,
     private readonly cache: HjudgeCacheService,
+    // The live key belongs to the results service — its name, TTL, payload
+    // shape and read-back check live there and are reached through
+    // `publishLiveRows`. Nothing in this file constructs a cache key itself.
+    private readonly results: HjudgeResultsService,
   ) {}
 
   // ───────────────────────────────────────────────────────── credentials
@@ -447,13 +460,136 @@ export class HjudgeIngestService {
    * the alternative — inventing an athlete row from a result — is how a start
    * list quietly grows people nobody entered.
    */
+  /**
+   * One chunk of a standings snapshot — into the CACHE, or into the tables.
+   *
+   * TWO DESTINATIONS, BECAUSE A RACE HAS TWO KINDS OF STANDINGS.
+   *
+   *   cache (the default, and what the venue's timer sends every few minutes)
+   *     The rows are assembled into the same Valkey payload `results_mode =
+   *     'live'` already serves, under the same key the RaceResult pull writes.
+   *     Provisional by construction: it expires, every push replaces it, and
+   *     nothing about it is kept. This is what a race in progress IS — a
+   *     photograph of an unfinished event that changes every few minutes — and
+   *     writing each of those to Postgres would mean the database's answer to
+   *     "what happened" changed under a reader all afternoon.
+   *
+   *   store (one deliberate push, at the end)
+   *     The rows are written to `athletes`/`results` proper, so the standings
+   *     survive a Valkey eviction, a restart, and the next morning. This is
+   *     what the history page, the scorecard and the certificates read.
+   *
+   * THE CACHE PATH IS NOT A SHORTCUT AROUND PERSISTENCE — it is the live half
+   * of a system that has always had both, and the reason `results_mode` has
+   * three values rather than two. An event that only ever pushes to the cache
+   * has published nothing permanent, which is why the console says so and the
+   * venue gets a Publish-final button.
+   *
+   * ASSEMBLING A CACHE PAYLOAD FROM CHUNKS. A cache entry has to be written
+   * whole — there is no partial value worth serving — so the chunks are staged
+   * under short-lived keys and assembled on the final one. A chunk that did not
+   * survive staging is detected by its absence rather than silently dropped:
+   * `CacheService` swallows a dead Valkey, so a missing stage key is the only
+   * evidence there would be.
+   */
   async ingestResults(
     principal: HjudgeIngestPrincipal,
     chunk: IngestChunk<IngestResultRow>,
   ) {
     const batch = this.batchId(chunk);
     const rows = this.rowsOf(chunk, 'results');
+    const destination = chunk?.destination === 'store' ? 'store' : 'cache';
 
+    return destination === 'store'
+      ? this.storeResults(principal, chunk, batch, rows)
+      : this.cacheResults(principal, chunk, batch, rows);
+  }
+
+  /** The live path: stage this chunk, and on the last one publish the lot. */
+  private async cacheResults(
+    principal: HjudgeIngestPrincipal,
+    chunk: IngestChunk<IngestResultRow>,
+    batch: string,
+    rows: IngestResultRow[],
+  ) {
+    const seq = Number.isFinite(Number(chunk?.seq)) ? Number(chunk.seq) : 0;
+
+    if (!chunk?.final) {
+      await this.cache.set(this.stageKey(batch, seq), rows, STAGE_TTL_SECONDS);
+      return {
+        received: rows.length,
+        written: 0,
+        pruned: 0,
+        batch,
+        final: false,
+        destination: 'cache' as const,
+      };
+    }
+
+    // The final chunk carries its own rows and completes the set: everything
+    // from seq 0 up to this one.
+    const assembled: IngestResultRow[] = [];
+    for (let i = 0; i < seq; i++) {
+      const staged = await this.cache
+        .get<IngestResultRow[]>(this.stageKey(batch, i))
+        .catch(() => null);
+      if (!staged) {
+        throw new ServiceUnavailableException(
+          `Chunk ${i} of this push did not survive staging — Valkey is unreachable on this server, so live results cannot be assembled. Retry the push, or send the standings to the database instead.`,
+        );
+      }
+      assembled.push(...staged);
+    }
+    assembled.push(...rows);
+
+    const published = await this.results.publishLiveRows(
+      principal.eventId,
+      assembled,
+    );
+
+    // Staging keys are one push's scratch space and are worth nothing after it.
+    await Promise.all(
+      Array.from({ length: seq }, (_, i) =>
+        this.cache.delete(this.stageKey(batch, i)).catch(() => undefined),
+      ),
+    );
+
+    this.logger.log(
+      `Live standings pushed for ${principal.eventName}: ${published.rows} rows -> ${published.key}`,
+    );
+
+    return {
+      received: rows.length,
+      written: published.rows,
+      pruned: 0,
+      batch,
+      final: true,
+      destination: 'cache' as const,
+      cacheKey: published.key,
+      fetchedAt: published.fetchedAt,
+    };
+  }
+
+  /**
+   * The persistent path: the standings into `results`, to outlive the cache.
+   *
+   * `results` is one row per athlete (085's `hyfit_v2_results_athlete`), so a
+   * result arriving for an athlete who already has one under a different id has
+   * to displace it — same shape as the roster's natural-key clear, one column
+   * narrower.
+   *
+   * A result whose athlete this server does not have is refused with a message
+   * that says what to do about it. It means the roster and the standings were
+   * pushed out of order, the local server's own push sequence prevents it, and
+   * the alternative — inventing an athlete row from a result — is how a start
+   * list quietly grows people nobody entered.
+   */
+  private async storeResults(
+    principal: HjudgeIngestPrincipal,
+    chunk: IngestChunk<IngestResultRow>,
+    batch: string,
+    rows: IngestResultRow[],
+  ) {
     let written = 0;
     try {
       written = await this.db.tx(async (client) => {
@@ -544,6 +680,7 @@ export class HjudgeIngestService {
       pruned,
       batch,
       final: Boolean(chunk?.final),
+      destination: 'store' as const,
     };
   }
 
@@ -588,6 +725,12 @@ export class HjudgeIngestService {
       `Results push complete for ${eventId} (batch ${batch}): ${removed.rowCount ?? 0} stale row(s) removed`,
     );
     return removed.rowCount ?? 0;
+  }
+
+  /** Scratch space for one live push, namespaced by batch so two pushes cannot
+   *  read each other's chunks. */
+  private stageKey(batch: string, seq: number): string {
+    return `hjudge:ingest:${batch}:${seq}`;
   }
 
   private batchId(chunk: { batch?: string }): string {

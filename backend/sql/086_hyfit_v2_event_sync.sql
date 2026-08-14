@@ -237,6 +237,12 @@ CREATE TABLE IF NOT EXISTS hyfit_v2.event_push_targets (
   results_pushed_at     timestamptz,
   results_pushed_rows   integer,
 
+  -- The last time the standings were written to prod's TABLES rather than its
+  -- cache. Null all race long and set once at the end, which is exactly the
+  -- shape of the question "have we actually kept these anywhere yet".
+  results_stored_at     timestamptz,
+  results_stored_rows   integer,
+
   -- The digest of the last results payload that landed. A race in progress is
   -- pulled far more often than it changes, and re-sending an identical
   -- standings table sixty times an hour over venue wifi buys nothing.
@@ -257,6 +263,23 @@ CREATE TABLE IF NOT EXISTS hyfit_v2.event_push_targets (
 COMMENT ON TABLE hyfit_v2.event_push_targets IS
   'Where a local server pushes one offline event''s athletes + results, and how often. One row per event. `token` is a secret and must never leave this database.';
 
+-- CREATE TABLE IF NOT EXISTS is not a migration.
+--
+-- Editing the table body above does nothing at all to a database that already
+-- ran an earlier version of this file — the CREATE is skipped whole, and the
+-- columns added to it since are silently absent. Which is precisely how this
+-- was found: the push wrote its rows and then failed on the bookkeeping UPDATE
+-- with `column "results_stored_at" does not exist`, on a database that had
+-- "successfully" re-run this migration moments earlier.
+--
+-- So every column added after this file first shipped is also stated as an
+-- explicit ALTER. They are no-ops on a fresh database and the whole point on an
+-- existing one.
+ALTER TABLE hyfit_v2.event_push_targets
+  ADD COLUMN IF NOT EXISTS auto_import_results boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS results_stored_at   timestamptz,
+  ADD COLUMN IF NOT EXISTS results_stored_rows integer;
+
 -- Every attempt, kept.
 --
 -- The question this answers is asked at the worst possible moment — an hour
@@ -272,8 +295,14 @@ CREATE TABLE IF NOT EXISTS hyfit_v2.push_runs (
   id              bigserial PRIMARY KEY,
   event_id        uuid NOT NULL REFERENCES hyfit_v2.events (id) ON DELETE CASCADE,
 
+  -- Three, because the results go to two different places for two different
+  -- reasons: `results` is the fast provisional push into prod's Valkey that the
+  -- timer drives all race long, `results_final` is the one deliberate push that
+  -- writes prod's tables so the standings outlive the cache. See the ingest
+  -- service for why both exist.
   kind            text NOT NULL
-                    CONSTRAINT hyfit_v2_push_runs_kind_check CHECK (kind IN ('athletes','results')),
+                    CONSTRAINT hyfit_v2_push_runs_kind_check
+                    CHECK (kind IN ('athletes','results','results_final')),
   trigger_source  text NOT NULL
                     CONSTRAINT hyfit_v2_push_runs_trigger_check CHECK (trigger_source IN ('manual','schedule')),
   status          text NOT NULL
@@ -295,5 +324,15 @@ CREATE INDEX IF NOT EXISTS hyfit_v2_push_runs_event_time
 
 COMMENT ON TABLE hyfit_v2.push_runs IS
   'Append-only history of every push attempt from this server. Pruned to the most recent runs per event by the push service; nothing else deletes from it.';
+
+-- Same reason as above, and the same discovery: a CHECK written into a CREATE
+-- TABLE body does not widen on a re-run, so `results_final` was rejected by a
+-- constraint the migration believed it had just installed. Dropped and re-added
+-- rather than ALTERed, because there is no ALTER CONSTRAINT for a CHECK.
+ALTER TABLE hyfit_v2.push_runs
+  DROP CONSTRAINT IF EXISTS hyfit_v2_push_runs_kind_check;
+ALTER TABLE hyfit_v2.push_runs
+  ADD CONSTRAINT hyfit_v2_push_runs_kind_check
+  CHECK (kind IN ('athletes','results','results_final'));
 
 COMMIT;

@@ -105,6 +105,30 @@ const ago = (value: string | null | undefined) => {
 const intervalLabel = (minutes: number) =>
     minutes === 0 ? "Manual only" : minutes === 60 ? "Every hour" : `Every ${minutes} min`;
 
+/* Read a pasted connection code well enough to show what it points at.
+ *
+ * The backend decodes it again and is the authority — this is purely so the
+ * operator can SEE the server address and the event name before pressing
+ * Connect, and correct the address if the venue reaches prod by another route.
+ * A code that will not decode here simply shows nothing; it is not rejected,
+ * because the backend's message is the better one. */
+function peekCode(raw: string): { baseUrl: string; eventName: string; expiresAt: string } | null {
+    const compact = String(raw ?? "").replace(/\s+/g, "");
+    if (!compact.startsWith("HYFITSYNC1.")) return null;
+    try {
+        const b64 = compact.slice("HYFITSYNC1.".length).replace(/-/g, "+").replace(/_/g, "/");
+        const bytes = Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
+        const d = JSON.parse(new TextDecoder().decode(bytes));
+        return {
+            baseUrl: String(d.baseUrl ?? ""),
+            eventName: String(d.eventName ?? ""),
+            expiresAt: String(d.expiresAt ?? ""),
+        };
+    } catch {
+        return null;
+    }
+}
+
 /* base64url of UTF-8, matching `encodeSyncCredential` on the backend.
  *
  * Through TextEncoder rather than straight into btoa, because btoa throws on
@@ -560,6 +584,11 @@ function LocalPanel({
 }) {
     const [code, setCode] = useState("");
     const [baseUrl, setBaseUrl] = useState("");
+    // Changing where an already-bound event pushes, without re-pasting a code:
+    // a tunnel restarting on a new host is not a reason to go back to whoever
+    // holds the prod console for a fresh credential.
+    const [editingUrl, setEditingUrl] = useState(false);
+    const [urlDraft, setUrlDraft] = useState("");
     const target = state.target;
 
     const bind = () =>
@@ -596,9 +625,15 @@ function LocalPanel({
             return `${done.rows} ${kind === "athletes" ? "athlete" : "result"} row(s) pushed in ${done.chunks} request(s), ${done.durationMs}ms`;
         });
 
-    const configure = (patch: { intervalMinutes?: number; enabled?: boolean; autoImportResults?: boolean }) =>
+    const configure = (patch: {
+        intervalMinutes?: number;
+        enabled?: boolean;
+        autoImportResults?: boolean;
+        baseUrl?: string;
+    }) =>
         act("configure", async () => {
             await judgeApi(scoped("/admin/sync/config"), { method: "PUT", body: JSON.stringify(patch) });
+            if (patch.baseUrl !== undefined) return `Now pushing to ${patch.baseUrl}`;
             if (patch.enabled !== undefined)
                 return patch.enabled ? "Automatic pushes resumed" : "Automatic pushes paused";
             if (patch.autoImportResults !== undefined)
@@ -611,31 +646,66 @@ function LocalPanel({
         });
 
     if (!target) {
+        const peek = peekCode(code);
+        // The address the code carries, unless the operator has typed over it.
+        const effectiveUrl = baseUrl.trim() || peek?.baseUrl || "";
+
         return (
             <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
                 <h2 className="text-sm font-bold uppercase tracking-wide">Connect to prod</h2>
                 <p className="mt-1 text-xs text-fog">
-                    Paste the connection code from prod&apos;s Sync screen for the matching event. Nothing is stored until
-                    prod confirms which event the code opens — check the name it answers with before you push anything.
+                    Paste the connection code from prod&apos;s Sync screen for the matching event, and check the server
+                    address it is pointing at. Nothing is stored until prod confirms which event the code opens.
                 </p>
-                <textarea
-                    value={code}
-                    onChange={(e) => setCode(e.target.value)}
-                    rows={4}
-                    placeholder="HYFITSYNC1.…"
-                    className="mt-3 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
-                />
+
                 <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">
-                        Override the address (only if the code&apos;s does not resolve here)
-                    </span>
+                    <span className="font-bold uppercase tracking-widest text-fog">1 · Connection code</span>
+                    <textarea
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        rows={4}
+                        placeholder="HYFITSYNC1.…"
+                        className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
+                    />
+                </label>
+
+                {/* Not an "override" any more: the address prod is reachable on is
+                    a thing the venue operator owns. The code fills it in, and the
+                    field stays editable because the address prod knows about
+                    itself and the address the venue can reach are routinely
+                    different — a load balancer, a tunnel, a LAN IP. */}
+                <label className="mt-3 block text-xs">
+                    <span className="font-bold uppercase tracking-widest text-fog">2 · Prod server address</span>
                     <input
                         value={baseUrl}
                         onChange={(e) => setBaseUrl(e.target.value)}
-                        placeholder="https://app.example.com"
-                        className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
+                        placeholder={peek?.baseUrl || "https://app.example.com"}
+                        className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-sm outline-none focus:border-hyred"
                     />
+                    <span className="mt-1 block text-fog">
+                        {peek?.baseUrl && !baseUrl.trim()
+                            ? `Taken from the code. Leave it as it is unless this venue reaches prod another way.`
+                            : "The origin only — no path. This server must be able to reach it."}
+                    </span>
                 </label>
+
+                {peek && (
+                    <div className="mt-3 rounded-lg border border-smoke bg-ink p-3 text-xs">
+                        <span className="font-bold uppercase tracking-widest text-fog">This code says</span>
+                        <p className="mt-1 text-chalk">
+                            {peek.eventName || "an unnamed event"}
+                            {peek.expiresAt ? ` · expires ${when(peek.expiresAt)}` : ""}
+                        </p>
+                        <p className="mt-1 break-all font-mono text-fog">
+                            {effectiveUrl}/api/hyfit-judge/ingest/events/…/athletes
+                        </p>
+                        <p className="mt-1 text-fog">
+                            Prod will confirm the event name when you press Connect. Check it matches the race in front
+                            of you.
+                        </p>
+                    </div>
+                )}
+
                 <button
                     onClick={() => void bind()}
                     disabled={!!busy || !code.trim()}
@@ -657,12 +727,53 @@ function LocalPanel({
                         <h2 className="text-sm font-bold uppercase tracking-wide">
                             Connected to {target.remote_event_name || "prod"}
                         </h2>
-                        <p className="mt-1 text-xs text-fog">
-                            {target.base_url} · event {target.remote_event_id}
+                        {/* The two URLs this server will actually call, spelled
+                            out. "Where is it pushing?" is asked whenever a push
+                            fails, and a base URL plus an event id leaves the
+                            operator assembling it in their head. */}
+                        <p className="mt-1 break-all font-mono text-xs text-fog">
+                            {target.base_url}/api/hyfit-judge/ingest/events/{target.remote_event_id}/
+                            <span className="text-chalk">{"{athletes,results}"}</span>
                         </p>
                         <p className="mt-0.5 font-mono text-xs text-fog">
                             {target.token_prefix}… · expires {when(target.token_expires_at)}
                         </p>
+                        {editingUrl ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <input
+                                    value={urlDraft}
+                                    onChange={(e) => setUrlDraft(e.target.value)}
+                                    placeholder="https://app.example.com"
+                                    className="min-w-64 flex-1 rounded-lg border border-smoke bg-ink px-3 py-1.5 font-mono text-xs outline-none focus:border-hyred"
+                                />
+                                <button
+                                    onClick={async () => {
+                                        await configure({ baseUrl: urlDraft });
+                                        setEditingUrl(false);
+                                    }}
+                                    disabled={!!busy || !urlDraft.trim()}
+                                    className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                                >
+                                    Save
+                                </button>
+                                <button
+                                    onClick={() => setEditingUrl(false)}
+                                    className="text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={() => {
+                                    setUrlDraft(target.base_url);
+                                    setEditingUrl(true);
+                                }}
+                                className="mt-1 text-xs font-bold uppercase tracking-widest text-fog underline hover:text-chalk"
+                            >
+                                Change server address
+                            </button>
+                        )}
                     </div>
                     <div className="flex flex-wrap gap-2">
                         <button

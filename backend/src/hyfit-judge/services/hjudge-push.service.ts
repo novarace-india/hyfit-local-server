@@ -1,6 +1,8 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -19,7 +21,7 @@ import {
   normaliseBaseUrl,
 } from '../hjudge-sync-credential.util';
 
-export type PushKind = 'athletes' | 'results';
+export type PushKind = 'athletes' | 'results' | 'results_final';
 export type PushTrigger = 'manual' | 'schedule';
 
 export interface PushOutcome {
@@ -48,6 +50,8 @@ interface TargetRow {
   athletes_pushed_rows: number | null;
   results_pushed_at: string | null;
   results_pushed_rows: number | null;
+  results_stored_at: string | null;
+  results_stored_rows: number | null;
   results_fingerprint: string | null;
   last_attempt_at: string | null;
   last_status: string | null;
@@ -242,6 +246,7 @@ export class HjudgePushService {
       intervalMinutes?: number;
       enabled?: boolean;
       autoImportResults?: boolean;
+      baseUrl?: string;
     },
   ) {
     this.assertLocalRole();
@@ -265,13 +270,31 @@ export class HjudgePushService {
         ? target.auto_import_results
         : Boolean(body.autoImportResults);
 
+    // The address prod is reachable on, changeable without re-pasting the code.
+    //
+    // It is the one part of a binding that legitimately changes mid-event while
+    // everything else stays valid: a tunnel restarts on a new host, the venue
+    // gets a different route out, prod moves behind a new name. Forcing a
+    // Disconnect and a fresh code for that would mean going back to whoever
+    // holds the prod console, in the middle of a race, to re-issue a credential
+    // that was never the thing that broke.
+    let baseUrl = target.base_url;
+    if (body?.baseUrl !== undefined) {
+      baseUrl = normaliseBaseUrl(String(body.baseUrl));
+      if (!baseUrl) {
+        throw new BadRequestException(
+          'That is not a usable server address — give the origin, like https://app.example.com',
+        );
+      }
+    }
+
     const row = await this.db.q1<TargetRow>(
       `UPDATE event_push_targets
           SET interval_minutes = $2, enabled = $3, auto_import_results = $4,
-              updated_at = now()
+              base_url = $5, updated_at = now()
         WHERE event_id = $1
         RETURNING *`,
-      [eventId, interval, enabled, autoImport],
+      [eventId, interval, enabled, autoImport, baseUrl],
     );
     return { target: this.publicTarget(row!) };
   }
@@ -438,7 +461,7 @@ export class HjudgePushService {
         });
       }
 
-      const sent = await this.send(target, 'results', rows);
+      const sent = await this.send(target, 'results', rows, 'cache');
 
       await this.db.q(
         `UPDATE event_push_targets
@@ -449,6 +472,76 @@ export class HjudgePushService {
       );
 
       return { ...sent, rows: rows.length, message: importNote.trim() };
+    });
+  }
+
+  /**
+   * The standings into prod's TABLES, once, at the end.
+   *
+   * WHY THIS BUTTON EXISTS. Everything the timer sends goes into prod's Valkey,
+   * which is right for a race in progress and wrong for a race that has
+   * finished: the live key expires twelve hours after the last push, and a
+   * cache is allowed to lose things. An event whose standings only ever went
+   * there has published nothing that will still be answerable tomorrow — no
+   * history page, no scorecard, no certificate.
+   *
+   * So this is the deliberate act at the end of the day, and it is deliberate
+   * on purpose: pressing it says "these are the numbers". It always sends,
+   * ignoring the fingerprint, because the fingerprint tracks what the CACHE
+   * holds and says nothing about what the tables do.
+   *
+   * The roster goes first if prod has never had one, for the same foreign key
+   * reason as everywhere else.
+   */
+  async pushFinalResults(
+    eventId: string,
+    trigger: PushTrigger = 'manual',
+  ): Promise<PushOutcome> {
+    return this.run(eventId, 'results_final', trigger, async (target) => {
+      const { rows } = await this.db.q(
+        `SELECT id, athlete_id, bib, name, category, club, status,
+                rank, age_group_rank, total_ms, team_time_ms, cog_ms,
+                run1_ms, st1_ms, run2_ms, st2_ms, run3_ms, st3_ms,
+                run4_ms, st4_ms, run5_ms, st5_ms, run6_ms, st6_ms,
+                penalties, raw, source_url, imported_at
+           FROM results
+          WHERE event_id = $1
+          ORDER BY id`,
+        [eventId],
+      );
+
+      if (!rows.length) {
+        throw new BadRequestException(
+          'There are no standings on this server to publish. Import the results from RaceResult first.',
+        );
+      }
+
+      if (!target.athletes_pushed_at) {
+        const roster = await this.sendAthletesFor(eventId, target);
+        await this.db.q(
+          `UPDATE event_push_targets
+              SET athletes_pushed_at = now(), athletes_pushed_rows = $2,
+                  updated_at = now()
+            WHERE event_id = $1`,
+          [eventId, roster.rows],
+        );
+      }
+
+      const sent = await this.send(target, 'results', rows, 'store');
+
+      await this.db.q(
+        `UPDATE event_push_targets
+            SET results_stored_at = now(), results_stored_rows = $2,
+                updated_at = now()
+          WHERE event_id = $1`,
+        [eventId, rows.length],
+      );
+
+      return {
+        ...sent,
+        rows: rows.length,
+        message: 'Written to prod\'s database — these outlive the cache',
+      };
     });
   }
 
@@ -600,8 +693,9 @@ export class HjudgePushService {
    */
   private async send(
     target: TargetRow,
-    kind: PushKind,
+    path: 'athletes' | 'results',
     rows: unknown[],
+    destination?: 'cache' | 'store',
   ): Promise<{ chunks: number; bytes: number }> {
     const batch = randomUUID();
     const chunks = chunkByBytes(rows, hjudgeSyncConfig.pushMaxBytes);
@@ -612,10 +706,14 @@ export class HjudgePushService {
         batch,
         seq,
         final: seq === chunks.length - 1,
+        // Carried on EVERY chunk, not just the last: the receiver stages a
+        // cache push and writes a store push, and it has to know which on the
+        // first one, not after the fact.
+        ...(destination ? { destination } : {}),
         rows: chunks[seq],
       });
       bytes += Buffer.byteLength(payload, 'utf8');
-      await this.post(target, `${kind}`, payload);
+      await this.post(target, path, payload);
     }
 
     return { chunks: chunks.length, bytes };
@@ -640,18 +738,31 @@ export class HjudgePushService {
       });
       const text = await response.text();
       if (!response.ok) {
-        throw new Error(
+        // A typed exception, not a bare Error, and this matters more than it
+        // looks: `run()` re-throws whatever it catches, and Nest turns an
+        // untyped Error into a bare 500 "Internal server error". The operator
+        // pressing Push then sees nothing, while the actual answer — "that
+        // event is online on prod", "the credential was revoked" — sits in the
+        // log and in `last_error` where they are not looking. 502 because the
+        // failure is upstream: this server did its job and prod said no.
+        throw new BadGatewayException(
           `Prod refused the push (${response.status}): ${this.reasonFrom(text)}`,
         );
       }
       return text;
     } catch (error: any) {
+      if (error instanceof HttpException) throw error;
       if (error?.name === 'AbortError') {
-        throw new Error(
+        throw new BadGatewayException(
           `Prod did not answer within ${Math.round(hjudgeSyncConfig.pushTimeoutMs / 1000)}s`,
         );
       }
-      throw error;
+      // A DNS failure, a refused connection, a dead venue link. The cause is
+      // the message an operator can act on, so it is carried rather than
+      // flattened into a 500.
+      throw new BadGatewayException(
+        `Could not reach ${target.base_url}: ${error?.message ?? error}`,
+      );
     } finally {
       clearTimeout(timer);
     }
