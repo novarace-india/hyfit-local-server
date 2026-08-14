@@ -334,6 +334,14 @@ function RoleBanner({ state }: { state: State }) {
                     ? "It issues connection codes and accepts pushes. It never pushes anywhere itself."
                     : "It pushes this event's athletes and results up to prod. It accepts no pushes."}
             </span>
+            {/* The commonest confusion this screen produces: half the feature is
+                on the OTHER server, and a console showing only its own half looks
+                like a console missing controls. Say where they are. */}
+            <span className="w-full text-xs text-fog">
+                {isProd
+                    ? "Looking for the roster sync, the push interval or the results controls? Those live on the venue server's copy of this screen — the one started with HYFIT_NODE_ROLE=local."
+                    : "Connection codes are issued on prod's copy of this screen, not here."}
+            </span>
             {/* HYFIT_NODE_ROLE holding something unrecognised falls back to prod,
                 which on a venue laptop looks exactly like a laptop refusing to
                 push. Say so rather than letting somebody debug the network. */}
@@ -854,6 +862,27 @@ function LocalPanel({
                 >
                     {busy === "bind" ? "Checking with prod…" : "Connect"}
                 </button>
+
+                {/* Everything below only exists once there is somewhere to push
+                    to, so before that this screen is one box and a button — and
+                    looks like a screen with its controls missing. Name them. */}
+                <div className="mt-4 border-t border-smoke pt-3 text-xs text-fog">
+                    <span className="font-bold uppercase tracking-widest">Once connected, this page gains</span>
+                    <ul className="mt-1.5 list-disc space-y-0.5 pl-4">
+                        <li>
+                            <span className="text-chalk">Sync athletes to prod</span> — the roster, on demand
+                        </li>
+                        <li>
+                            <span className="text-chalk">Push results now</span> and the{" "}
+                            <span className="text-chalk">interval dropdown</span> — manual, or every
+                            1/2/3/5/10/20/30/60 minutes
+                        </li>
+                        <li>
+                            <span className="text-chalk">Publish final standings</span> — the one push that writes
+                            prod&apos;s database instead of its cache
+                        </li>
+                    </ul>
+                </div>
             </section>
         );
     }
