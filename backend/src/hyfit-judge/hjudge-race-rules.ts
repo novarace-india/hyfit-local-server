@@ -77,6 +77,47 @@ export function allowsBearCrawlPenalty(contestId: string | null | undefined) {
   return !bearCrawlPenaltyExemptContests.has(String(contestId ?? '').trim());
 }
 
+// Station 2 (Farmer's Carry) offers an Incomplete Laps penalty only for these
+// contests — an allow-list, unlike the Bear Crawl exemption above, because
+// most contests should never see the control at all. Must stay byte-for-byte
+// in step with `_incompleteLapsPenaltyContests` in
+// `hyfit_judge/lib/models/race_format.dart`: that is where the control is
+// shown to the judge, this is what accepts the race it produces, and the two
+// drifting apart is what rejected every Station 2 penalty submitted after the
+// tablet added the control (the whole race, not just the field).
+const incompleteLapsPenaltyContests = new Set([
+  '5',
+  '6',
+  '7',
+  '8',
+  '10',
+  '11',
+  '12',
+  '13',
+]);
+
+export function allowsIncompleteLapsPenalty(
+  contestId: string | null | undefined,
+) {
+  return incompleteLapsPenaltyContests.has(String(contestId ?? '').trim());
+}
+
+/**
+ * How many seconds a `penalty` outcome is worth at a given station, for a
+ * given contest. Zero means this station/contest combination offers no
+ * penalty at all — the single source of truth `validateStationOutcome` checks
+ * submissions against, mirroring `penaltySecondsForStationOutcome()` in
+ * `race_format.dart`.
+ */
+export function penaltySecondsForStationOutcome(
+  stationNumber: number,
+  contestId: string | null | undefined,
+) {
+  if (stationNumber === 3 && allowsBearCrawlPenalty(contestId)) return 10;
+  if (stationNumber === 2 && allowsIncompleteLapsPenalty(contestId)) return 120;
+  return 0;
+}
+
 export function validateStationOutcome(
   stationNumber: number,
   outcome: string,
@@ -86,11 +127,8 @@ export function validateStationOutcome(
 ) {
   if (outcome === 'ics') return penaltySeconds === 0;
   if (outcome === 'penalty') {
-    return (
-      stationNumber === 3 &&
-      penaltySeconds === 10 &&
-      allowsBearCrawlPenalty(contestId)
-    );
+    const allowed = penaltySecondsForStationOutcome(stationNumber, contestId);
+    return allowed > 0 && penaltySeconds === allowed;
   }
   return outcome === 'none' && penaltySeconds === 0;
 }

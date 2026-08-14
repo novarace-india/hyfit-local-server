@@ -73,9 +73,15 @@ import { HjudgeIngestGuard } from './hjudge-ingest.guard';
     HjudgePushService,
     HjudgePushScheduler,
   ],
-  // HjudgeAuthService is exported for HyfitgamesModule alone: the merged admin
-  // console signs in once with email + password and needs a field session
-  // opened on the same `hyfit_v2.users` row. See openLinkedSession.
+  // Exported for HyfitgamesModule alone:
+  //   * HjudgeAuthService — the merged admin console signs in once with email
+  //     and password and needs a field session opened on the same
+  //     `hyfit_v2.users` row. See openLinkedSession.
+  //   * HjudgeResultsService — the athlete app shows an athlete their own live
+  //     standing while a race is running, and the live rows are a Valkey key
+  //     owned by this module. Sharing the reader is the point: the key name,
+  //     the mode check and the row shape stay in one place, rather than the
+  //     athlete side growing its own copy that drifts.
   exports: [HjudgeDbService, HjudgeAuthService, HjudgeResultsService],
 })
 export class HyfitJudgeModule {}

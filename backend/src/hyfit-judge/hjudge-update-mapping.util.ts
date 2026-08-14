@@ -57,6 +57,12 @@ export const updateFieldDefaults = {
   // Judge app — cognitive recall and the out-of-competition flag an ICS raises
   cognitiveskillpenalty: 'cognitiveskillpenalty',
   cognitiveskillbonus: 'cognitiveskillbonus',
+  // The colour sequence itself, not just its score — what was shown to
+  // memorise and what the athlete tapped back, ten letters each (e.g.
+  // "RGBYRGBYRG"). Lets anyone re-derive or dispute the score from the raw
+  // record instead of trusting the penalty/bonus alone.
+  cognitivepattershown: 'cognitivepattershown',
+  cognitiverecalled: 'cognitiverecalled',
   // Judge app — authoritative timing backups, written as decimal seconds
   cognitivememorisetime: 'cognitivememorisetime',
   run1time: 'run1time',

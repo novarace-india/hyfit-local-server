@@ -118,8 +118,12 @@ export class HjudgeAdminService {
   // public title ("HYFIT Bengaluru 2026") are different sentences.
   async listEvents() {
     const result = await this.db.q(
+      // `results_mode` rides along so the list can show — and change — what
+      // each event is publishing without a call per row. It is read here and
+      // written only through PUT /admin/results/mode, which owns the column.
       `SELECT id, name, COALESCE(venue,'') AS venue, starts_at, ends_at,
               timezone, status, is_active, event_date,
+              results_mode, results_stored_at,
               platform_event_id AS "platformEventId",
               created_at, updated_at
        FROM events
@@ -441,8 +445,10 @@ export class HjudgeAdminService {
         bib_lookup_url AS "participantApiUrl",
         update_url AS "updateApiUrl",
         map_lookup_url AS "mapLookupUrl",
+        results_url AS "resultsUrl",
         participant_mapping AS "participantMapping",
         update_mapping AS "updateMapping",
+        results_mapping AS "resultsMapping",
         declaration_text AS "declarationText",
         declaration_version AS "declarationVersion",
         checkin_window_enabled AS "checkinWindowEnabled",
@@ -493,14 +499,24 @@ export class HjudgeAdminService {
     // none, and is fetched whole.
     const mapUrl = String(data.mapLookupUrl ?? '').trim();
 
+    // The standings feed. Validated only for being a URL — what it returns is
+    // the results importer's problem, and it reports the columns it found so a
+    // wrong key is diagnosable rather than merely refused here.
+    const resultsUrl = String(data.resultsUrl ?? '').trim();
+    if (resultsUrl && !/^https?:\/\//i.test(resultsUrl))
+      throw new BadRequestException(
+        'The results endpoint must be a complete http(s) URL',
+      );
+
     const result = await this.db.q<{ id: string; version: number }>(
       `INSERT INTO raceresults_endpoints(event_id, version, state,
-        bib_lookup_url, update_url, map_lookup_url,
-        participant_mapping, update_mapping, declaration_text, declaration_version,
+        bib_lookup_url, update_url, map_lookup_url, results_url,
+        participant_mapping, update_mapping, results_mapping,
+        declaration_text, declaration_version,
         checkin_window_enabled, checkin_opens_before_minutes, checkin_closes_after_minutes)
        VALUES($1,
          COALESCE((SELECT max(version) + 1 FROM raceresults_endpoints WHERE event_id = $1), 1),
-         'draft', $2, $3, $4, $5::jsonb, $6::jsonb, $7,
+         'draft', $2, $3, $4, $11, $5::jsonb, $6::jsonb, $12::jsonb, $7,
          COALESCE((SELECT max(declaration_version) + 1 FROM raceresults_endpoints
            WHERE event_id = $1 AND declaration_text <> $7), 1), $8, $9, $10)
        RETURNING id, version`,
@@ -515,6 +531,8 @@ export class HjudgeAdminService {
         Boolean(data.checkinWindowEnabled),
         opensBefore,
         closesAfter,
+        resultsUrl,
+        JSON.stringify(data.resultsMapping ?? {}),
       ],
     );
     await this.audit(

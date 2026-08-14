@@ -268,6 +268,38 @@ describe('HjudgeRaceSubmitService', () => {
       ).rejects.toThrow(/cannot be recorded/);
     });
 
+    // Station 2 (Farmer's Carry) Incomplete Laps: the app added this control
+    // (commit 4e8515e) for contests 5, 6, 7, 8, 10, 11, 12, 13 without a
+    // matching backend change, so a judge using it got the WHOLE race
+    // rejected at the finish line — every split, every other station, gone
+    // with it, and no way to recover without a code fix.
+    it.each(['5', '6', '7', '8', '10', '11', '12', '13'])(
+      'writes an Incomplete Laps penalty at station 2 for contest %s',
+      async (contestId) => {
+        await submit(
+          { stationNumber: 2, outcome: 'penalty', penaltySeconds: 120 },
+          contestId,
+        );
+        expect(valueOf('station2penalty')).toBe('120');
+        expect(valueOf('station2ics')).toBe('0');
+      },
+    );
+
+    it('refuses an Incomplete Laps penalty at station 2 outside its contests', async () => {
+      await expect(
+        submit({ stationNumber: 2, outcome: 'penalty', penaltySeconds: 120 }, '1'),
+      ).rejects.toThrow(/cannot be recorded/);
+      expect(writes).toHaveLength(0);
+    });
+
+    it('refuses the Bear Crawl amount at station 2, even in an allowed contest', async () => {
+      // The two controls are not interchangeable: 120s belongs to station 2,
+      // 10s to station 3, and a mix-up must not slip through as "some number".
+      await expect(
+        submit({ stationNumber: 2, outcome: 'penalty', penaltySeconds: 10 }, '5'),
+      ).rejects.toThrow(/cannot be recorded/);
+    });
+
     it('refuses an ICS carrying seconds', async () => {
       await expect(
         submit({ stationNumber: 3, outcome: 'ics', penaltySeconds: 10 }),
@@ -301,6 +333,12 @@ describe('HjudgeRaceSubmitService', () => {
       await withResponse(['R', 'G', 'B', 'Y', 'R', 'G', 'B', 'X', 'X', 'X']);
       expect(valueOf('cognitiveskillpenalty')).toBe('0');
       expect(valueOf('cognitiveskillbonus')).toBe('0');
+    });
+
+    it('writes the sequence shown and the response recalled, raw', async () => {
+      await withResponse(['R', 'G', 'B', 'Y', 'R', 'X', 'X', 'X', 'X', 'X']);
+      expect(valueOf('cognitivepattershown')).toBe('RGBYRGBYRG');
+      expect(valueOf('cognitiverecalled')).toBe('RGBYRXXXXX');
     });
 
     it('refuses a sequence that is not a real one', async () => {
@@ -422,31 +460,93 @@ describe('HjudgeRaceSubmitService', () => {
   });
 
   describe('completion status', () => {
+    // RaceResult's BUILT-IN `Status` vocabulary — the same one every live
+    // results and statistics view reads via `getParticipantStatus` in
+    // `publicRoutes/utils/live-helpers.ts`: 0 = Completed, 1 = OOC, 2 = DSQ,
+    // 3 = DNF, 4 = DNS. A clean finish must never collide with OOC — that
+    // collision is what made every finisher indistinguishable from an athlete
+    // who never completed the course.
     const race = {
       bibs: ['101'],
       raceMode: 'single' as const,
       boundaries: soloBoundaries(),
     };
 
-    it('marks the athlete completed on every submission', async () => {
+    it('marks a clean finish Completed, not OOC', async () => {
       // Handing the race in IS the completion — it does not wait to be asked.
       await service.submit(EVENT, race);
-      expect(valueOf('Status')).toBe('1');
+      expect(valueOf('Status')).toBe('0');
     });
 
-    it('marks both athletes of a pair', async () => {
+    it('marks both athletes of a clean pair Completed', async () => {
       await service.submit(EVENT, {
         ...race,
         bibs: ['201', '202'],
         raceMode: 'doubles',
       });
+      expect(valueOf('Status', '201')).toBe('0');
+      expect(valueOf('Status', '202')).toBe('0');
+    });
+
+    it('marks the athlete OOC when any station was recorded ICS', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        stationOutcomes: [
+          { stationNumber: 4, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
+      expect(valueOf('Status')).toBe('1');
+    });
+
+    it('marks both athletes of a pair OOC when any station was ICS', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        bibs: ['201', '202'],
+        raceMode: 'doubles',
+        stationOutcomes: [
+          { stationNumber: 2, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
       expect(valueOf('Status', '201')).toBe('1');
       expect(valueOf('Status', '202')).toBe('1');
     });
 
-    it('lets an explicit status override it', async () => {
+    it('is not thrown off OOC by a clean station judged alongside an ICS one', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        stationOutcomes: [
+          { stationNumber: 3, outcome: 'none', penaltySeconds: 0 },
+          { stationNumber: 4, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
+      expect(valueOf('Status')).toBe('1');
+    });
+
+    it('stays Completed when every judged station is clean', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        stationOutcomes: [
+          { stationNumber: 3, outcome: 'penalty', penaltySeconds: 10 },
+        ],
+        contestId: '5',
+      });
+      expect(valueOf('Status')).toBe('0');
+    });
+
+    it('lets an explicit status override the derivation', async () => {
       await service.submit(EVENT, { ...race, status: '4' });
       expect(valueOf('Status')).toBe('4');
+    });
+
+    it('lets an explicit status override even an ICS-derived OOC', async () => {
+      await service.submit(EVENT, {
+        ...race,
+        status: '3',
+        stationOutcomes: [
+          { stationNumber: 4, outcome: 'ics', penaltySeconds: 0 },
+        ],
+      });
+      expect(valueOf('Status')).toBe('3');
     });
 
     it('honours a renamed field', async () => {
@@ -455,7 +555,7 @@ describe('HjudgeRaceSubmitService', () => {
         updateMapping: { status: 'RaceStatus' },
       }));
       await service.submit(EVENT, race);
-      expect(valueOf('RaceStatus')).toBe('1');
+      expect(valueOf('RaceStatus')).toBe('0');
       expect(valueOf('Status')).toBeUndefined();
     });
   });
@@ -519,6 +619,8 @@ describe('HjudgeRaceSubmitService', () => {
       await service.submit(EVENT, noRecall);
       expect(valueOf('cognitiveskillpenalty')).toBeUndefined();
       expect(valueOf('cognitiveskillbonus')).toBeUndefined();
+      expect(valueOf('cognitivepattershown')).toBeUndefined();
+      expect(valueOf('cognitiverecalled')).toBeUndefined();
     });
 
     it('rejects an EMPTY block rather than treating it as absent', async () => {

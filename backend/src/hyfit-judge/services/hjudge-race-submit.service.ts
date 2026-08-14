@@ -70,17 +70,22 @@ export interface RaceSubmission {
 /**
  * What `Status` is set to when a race is handed in.
  *
- * Submitting a race is what marks the athlete completed, so this goes out with
- * every submission.
+ * `Status` is RaceResult's BUILT-IN participant status, and its vocabulary is
+ * fixed, not free text — `getParticipantStatus` in
+ * `publicRoutes/utils/live-helpers.ts` (which every live-results and
+ * statistics view reads) is `0 = Completed, 1 = OOC, 2 = DSQ, 3 = DNF,
+ * 4 = DNS`. Handing a race in is what marks an athlete completed, so `0` goes
+ * out with every submission UNLESS the race itself says otherwise: a station
+ * marked ICS means the athlete never finished the course, i.e. `1` (OOC) —
+ * see `RACE_OOC_STATUS` below and where it is chosen in `fieldsFor`.
  *
- * ⚠ CONFIRM THIS VALUE BEFORE AN EVENT. If `Status` is RaceResult's BUILT-IN
- * participant status rather than a custom variable, its vocabulary is not free
- * text — the wrong number here marks every finisher DNF or DSQ instead of
- * finished, and it will do it silently, because `savevalue` accepts anything.
- * The field name itself is overridable per event in the update mapping; this
- * value is not, and deliberately lives in one place for that reason.
+ * The field name itself is overridable per event in the update mapping; these
+ * values are not, and deliberately live in one place for that reason.
  */
-const RACE_COMPLETED_STATUS = '1';
+const RACE_COMPLETED_STATUS = '0';
+
+/** See `RACE_COMPLETED_STATUS` — set instead of it when any station is ICS. */
+const RACE_OOC_STATUS = '1';
 
 /** One RaceResult field, already resolved to that event's spelling. */
 interface FieldWrite {
@@ -222,16 +227,37 @@ export class HjudgeRaceSubmitService {
       );
       writes.push({ key: 'cognitiveskillpenalty', value: String(penaltySeconds) });
       writes.push({ key: 'cognitiveskillbonus', value: String(bonusSeconds) });
+      // The raw sequence and response themselves, not just their score — ten
+      // letters each, e.g. "RGBYRGBYRG" — so the record can be re-checked or
+      // disputed against what was actually shown and tapped, not only the
+      // penalty/bonus `cognitiveAdjustment` derived from them.
+      writes.push({
+        key: 'cognitivepattershown',
+        value: data.cognitive.sequence.join(''),
+      });
+      writes.push({
+        key: 'cognitiverecalled',
+        value: data.cognitive.response.join(''),
+      });
     }
 
     if (data.athleteNote !== undefined) {
       writes.push({ key: 'athletenotes', value: String(data.athleteNote ?? '') });
     }
-    // Handing the race in is what completes the athlete, so both status fields
-    // are written every time rather than only when the tablet asks. An explicit
-    // status on the submission overrides them, for a finish that is not a
-    // normal one.
-    const completed = data.status ? String(data.status) : RACE_COMPLETED_STATUS;
+    // Handing the race in is what settles the athlete's status, so both status
+    // fields are written every time rather than only when the tablet asks. An
+    // explicit status on the submission overrides the derivation, for a finish
+    // that is not a normal one. Otherwise: any station recorded ICS makes the
+    // whole race OOC, exactly as the judge tablet's own OOC banner already
+    // shows the judge — see `RACE_COMPLETED_STATUS`.
+    const hasIcs = (data.stationOutcomes ?? []).some(
+      (outcome) => outcome.outcome === 'ics',
+    );
+    const completed = data.status
+      ? String(data.status)
+      : hasIcs
+        ? RACE_OOC_STATUS
+        : RACE_COMPLETED_STATUS;
     writes.push({ key: 'status', value: completed });
     writes.push({ key: 'statusofathelet', value: completed });
 

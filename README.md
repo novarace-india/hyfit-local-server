@@ -273,7 +273,7 @@ Everything is drawn in the browser. No payload reaches the backend.
 
 ## Verified
 
-- `backend`: `npm run build` clean, `npm test` 296 passing.
+- `backend`: `npm run build` clean, `npm test` 363 passing (17 suites).
 - `frontend`: `npm run build` clean, 24 routes.
 - The check-in counter was walked end-to-end in a headless browser against the
   **real** service classes — only Postgres and the RaceResult server were faked

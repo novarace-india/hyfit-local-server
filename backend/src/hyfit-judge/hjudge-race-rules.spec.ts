@@ -1,9 +1,12 @@
 import {
+  allowsBearCrawlPenalty,
+  allowsIncompleteLapsPenalty,
   cognitiveAdjustment,
   chooseUniqueCognitiveSequence,
   finalSegmentTimings,
   generateCognitiveSequence,
   isValidCognitiveSequence,
+  penaltySecondsForStationOutcome,
   scoreSequence,
   timingBackupValues,
   validateStationOutcome,
@@ -58,6 +61,65 @@ describe('HYFIT Judge race rules', () => {
     expect(validateStationOutcome(1, 'ics', 0, '')).toBe(true);
     expect(validateStationOutcome(6, 'ics', 0, 'Equipment issue')).toBe(true);
     expect(validateStationOutcome(2, 'ics', 10, '')).toBe(false);
+  });
+
+  // Station 2 (Farmer's Carry) Incomplete Laps and Station 3 (Bear Crawl) are
+  // the two stations that can carry a real penalty. Must stay in step with
+  // `_incompleteLapsPenaltyContests` / `_bearCrawlPenaltyExemptContests` in
+  // `hyfit_judge/lib/models/race_format.dart` — the tablet is what shows the
+  // control, this is what accepts the race it produces, and the two drifting
+  // apart is what rejected every Station 2 penalty submitted after the
+  // tablet added the control (the whole race, not just the field).
+  describe('station penalties', () => {
+    it('allows the Incomplete Laps penalty at station 2 in its contests', () => {
+      for (const contestId of ['5', '6', '7', '8', '10', '11', '12', '13']) {
+        expect(allowsIncompleteLapsPenalty(contestId)).toBe(true);
+        expect(penaltySecondsForStationOutcome(2, contestId)).toBe(120);
+        expect(validateStationOutcome(2, 'penalty', 120, '', contestId)).toBe(
+          true,
+        );
+      }
+    });
+
+    it('refuses the Incomplete Laps penalty at station 2 outside its contests', () => {
+      for (const contestId of ['1', '2', '3', '4', '9', '', 'unknown']) {
+        expect(allowsIncompleteLapsPenalty(contestId)).toBe(false);
+        expect(penaltySecondsForStationOutcome(2, contestId)).toBe(0);
+        expect(validateStationOutcome(2, 'penalty', 120, '', contestId)).toBe(
+          false,
+        );
+      }
+    });
+
+    it('refuses the Bear Crawl amount at station 2 and the Laps amount at station 3', () => {
+      expect(validateStationOutcome(2, 'penalty', 10, '', '5')).toBe(false);
+      expect(validateStationOutcome(3, 'penalty', 120, '', '5')).toBe(false);
+    });
+
+    it('still allows the Bear Crawl penalty at station 3 where the contest allows one', () => {
+      expect(allowsBearCrawlPenalty('5')).toBe(true);
+      expect(penaltySecondsForStationOutcome(3, '5')).toBe(10);
+      expect(validateStationOutcome(3, 'penalty', 10, '', '5')).toBe(true);
+    });
+
+    it('still refuses the Bear Crawl penalty at station 3 in an exempt contest', () => {
+      for (const contestId of ['1', '2', '3', '4', '9']) {
+        expect(allowsBearCrawlPenalty(contestId)).toBe(false);
+        expect(penaltySecondsForStationOutcome(3, contestId)).toBe(0);
+        expect(validateStationOutcome(3, 'penalty', 10, '', contestId)).toBe(
+          false,
+        );
+      }
+    });
+
+    it('offers no penalty at any other station regardless of contest', () => {
+      for (const stationNumber of [1, 4, 5, 6]) {
+        expect(penaltySecondsForStationOutcome(stationNumber, '5')).toBe(0);
+        expect(
+          validateStationOutcome(stationNumber, 'penalty', 10, '', '5'),
+        ).toBe(false);
+      }
+    });
   });
 
   it('derives the two final timing segments from persisted boundaries', () => {
