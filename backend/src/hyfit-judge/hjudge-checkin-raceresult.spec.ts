@@ -204,12 +204,17 @@ describe('HjudgeCheckinService', () => {
     });
 
     it('says nothing about stage flags in the lookup response', async () => {
-      // The response used to carry `stages`, read off the feed's
-      // stage1checkin/stage2checkin. Two fields answering "has this athlete
-      // been through?", able to disagree — the equipment is the answer.
+      // `stages` is back in the response — the counters ask which hand-overs
+      // have happened, and only saying what is left had them refusing an
+      // athlete already wearing a band. What must NOT come back is this: the
+      // feed's own stage1checkin/stage2checkin. That was the original sin —
+      // two fields answering "has this athlete been through?", able to
+      // disagree. `stages` is now derived from the equipment, so a feed
+      // claiming both stages against an athlete holding nothing reports
+      // nothing, exactly as `assignment` and `nextStage` do.
       feed([athlete({ stage1checkin: true, stage2checkin: true })]);
       const result = await service.getParticipant(EVENT, { bib: '11651' });
-      expect(result).not.toHaveProperty('stages');
+      expect(result?.stages).toEqual({});
       expect(result?.assignment).toEqual({ bib: '11651', wristband: '', transponder: '' });
       expect(result?.nextStage).toBe('STAGE_1_WRISTBAND');
     });
@@ -731,6 +736,26 @@ describe('HjudgeCheckinService', () => {
       expect(context.integration.mappingReadable).toBe(true);
       expect(context.integration.publishesWristband).toBe(true);
       expect(context.integration.publishesTransponder).toBe(true);
+    });
+
+    it('shows a wristband holder as having been through Stage 1', async () => {
+      // The bug this pins down: the counter asks what has already happened, and
+      // a response that only said what was LEFT had it telling a volunteer that
+      // an athlete with the band on their wrist had not done Stage 1 — so the
+      // transponder desk refused them.
+      feed([athlete({ wristbandid: 'A-11111' })]);
+      const result = await service.getParticipant(EVENT, { bib: '11651' });
+
+      expect(result?.stages.STAGE_1_WRISTBAND?.assetCode).toBe('A-11111');
+      expect(result?.stages.STAGE_2_TRANSPONDER).toBeUndefined();
+      expect(result?.nextStage).toBe('STAGE_2_TRANSPONDER');
+    });
+
+    it('shows nothing done for an athlete holding nothing', async () => {
+      feed([athlete()]);
+      const result = await service.getParticipant(EVENT, { bib: '11651' });
+      expect(result?.stages).toEqual({});
+      expect(result?.nextStage).toBe('STAGE_1_WRISTBAND');
     });
 
     it('reports the shift the volunteer is rostered onto', async () => {

@@ -4,6 +4,7 @@ import {
   buildAssignmentTable,
   holderOfAsset,
   nextStageFor,
+  stagesFor,
 } from './hjudge-checkin-rr.util';
 
 /**
@@ -185,6 +186,88 @@ describe('the stage an athlete is due', () => {
 
   it('ignores leading zeros on the bib, as everything else does', () => {
     expect(nextStageFor(assignmentFor(table, '002'))).toBe('STAGE_2_TRANSPONDER');
+  });
+});
+
+/* The same row read the other way round: what HAS happened, which is the
+ * direction the tablet counters ask in. A counter that cannot see a Stage 1
+ * receipt refuses to hand over a transponder — so an athlete wearing a band
+ * whose Stage 1 does not appear here is one who gets turned away at Stage 2. */
+describe('the stages an athlete has been through', () => {
+  const table = buildAssignmentTable(
+    [
+      { Bib: 1, wristbandid: '', Transponder1: '' },
+      { Bib: 2, wristbandid: 'A-2', Transponder1: '' },
+      { Bib: 3, wristbandid: 'A-3', Transponder1: 'T-3' },
+      { Bib: 4, wristbandid: '   ', Transponder1: '' },
+    ],
+    {},
+  );
+  const stagesOf = (bib: string) => stagesFor(assignmentFor(table, bib));
+
+  it('is empty for an athlete holding nothing', () => {
+    expect(stagesOf('1')).toEqual({});
+  });
+
+  it('records Stage 1 against the band they were issued', () => {
+    expect(stagesOf('2')).toEqual({
+      STAGE_1_WRISTBAND: {
+        state: 'completed',
+        assetCode: 'A-2',
+        completedAt: '',
+      },
+    });
+  });
+
+  it('records both once they hold both', () => {
+    const stages = stagesOf('3');
+    expect(stages.STAGE_1_WRISTBAND?.assetCode).toBe('A-3');
+    expect(stages.STAGE_2_TRANSPONDER?.assetCode).toBe('T-3');
+  });
+
+  it('does not count a blank column as a hand-over', () => {
+    // A column of empty strings is what the table looks like on the morning of
+    // the event. Reading it as a completed Stage 1 would send the whole field
+    // to the transponder desk.
+    expect(stagesOf('4')).toEqual({});
+  });
+
+  it('never disagrees with the stage the athlete is due', () => {
+    // The two are one row read in opposite directions, and this is the property
+    // that has to hold for that to stay true: whatever is left is exactly what
+    // is not already recorded.
+    for (const bib of ['1', '2', '3', '9999']) {
+      const assignment = assignmentFor(table, bib);
+      const due = nextStageFor(assignment);
+      const done = stagesFor(assignment);
+      if (due) expect(done[due]).toBeUndefined();
+      else
+        expect(Object.keys(done).sort()).toEqual([
+          'STAGE_1_WRISTBAND',
+          'STAGE_2_TRANSPONDER',
+        ]);
+    }
+  });
+
+  it('borrows the feed timestamp without letting it decide anything', () => {
+    // The time is printed on a card and nothing more. A feed that claims a
+    // Stage 2 the equipment does not show still yields no Stage 2 here.
+    const stages = stagesFor(assignmentFor(table, '2'), {
+      STAGE_1_WRISTBAND: {
+        state: 'completed',
+        assetCode: 'ignored',
+        completedAt: '2026-08-15 09:12:00',
+      },
+      STAGE_2_TRANSPONDER: {
+        state: 'completed',
+        assetCode: 'T-999',
+        completedAt: '2026-08-15 10:00:00',
+      },
+    });
+    expect(stages.STAGE_1_WRISTBAND?.completedAt).toBe('2026-08-15 09:12:00');
+    // The band on the wrist, not the one the feed named.
+    expect(stages.STAGE_1_WRISTBAND?.assetCode).toBe('A-2');
+    expect(stages.STAGE_2_TRANSPONDER).toBeUndefined();
   });
 });
 

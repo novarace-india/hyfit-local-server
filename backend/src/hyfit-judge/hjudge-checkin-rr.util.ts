@@ -543,6 +543,51 @@ export function nextStageFor(
   return null;
 }
 
+/**
+ * The same answer as `nextStageFor`, said the other way round: which stages
+ * this athlete HAS been through, keyed by stage.
+ *
+ * It exists because the tablet counters ask the question in that direction —
+ * they look for a Stage 1 receipt before offering a transponder — and a
+ * response that only says what is *left* leaves them concluding that nothing
+ * has happened yet, which reads at the desk as "Stage 1 is not complete" for an
+ * athlete wearing the band.
+ *
+ * Derived from the mapping table alone, which is what keeps this from being the
+ * second opinion the old `stages` field was. That one came off the participant
+ * feed's `stage1checkin` flags — a separate source, free to contradict the
+ * equipment, with nothing in the payload to say which won. This one is the
+ * equipment, rearranged: it and `nextStage` are two readings of one row and
+ * cannot disagree.
+ *
+ * The feed's own timestamps are allowed in for `completedAt` and nothing else.
+ * A time decides nothing here — it is printed on a card — so borrowing it
+ * cannot reintroduce a contradiction about whether the hand-over happened.
+ */
+export function stagesFor(
+  assignment: AssetAssignment,
+  feedStages: Partial<Record<CheckinStageType, CheckinStageState>> = {},
+): Partial<Record<CheckinStageType, CheckinStageState>> {
+  const stages: Partial<Record<CheckinStageType, CheckinStageState>> = {};
+  const wristband = assignment.wristband.trim();
+  const transponder = assignment.transponder.trim();
+
+  if (wristband)
+    stages.STAGE_1_WRISTBAND = {
+      state: 'completed',
+      assetCode: wristband,
+      completedAt: feedStages.STAGE_1_WRISTBAND?.completedAt ?? '',
+    };
+  if (transponder)
+    stages.STAGE_2_TRANSPONDER = {
+      state: 'completed',
+      assetCode: transponder,
+      completedAt: feedStages.STAGE_2_TRANSPONDER?.completedAt ?? '',
+    };
+
+  return stages;
+}
+
 const doublesContests: Record<string, string> = {
   '9': 'Bloodline Doubles',
   '10': 'Male Doubles',

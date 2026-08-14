@@ -10,6 +10,7 @@ import {
   findTeammates,
   holderOfAsset,
   nextStageFor,
+  stagesFor,
   stageWriteTargets,
   teamWarning,
   isDoublesContest,
@@ -146,15 +147,22 @@ export class HjudgeCheckinService {
        * from the mapping table, which is the only thing this response says
        * about equipment.
        *
-       * There is deliberately no `stages` here. It used to carry the
-       * `stage1checkin` / `stage2checkin` flags off the participant feed, and
-       * having both in one payload invited exactly the confusion this was meant
-       * to end: two fields answering "has this athlete been through?", able to
-       * disagree, with nothing in the shape of the response to say which one
-       * counts. The equipment is the answer.
+       * `stages` alongside it is the same row read backwards: which hand-overs
+       * have already happened. Both come off `assignment`, so the three fields
+       * are one answer in three shapes and cannot contradict each other.
+       *
+       * That is the whole difference from the old `stages`, which was removed
+       * for good reason: it carried the `stage1checkin` / `stage2checkin` flags
+       * off the participant feed — a second source, able to disagree with the
+       * equipment, with nothing in the payload to say which one counted. This
+       * one is not a second opinion. It is here because the counters ask "has
+       * Stage 1 happened?" and a response that only answers "what is left?"
+       * leaves them telling a volunteer that an athlete already wearing a band
+       * has not been through Stage 1.
        */
       assignment,
       nextStage: nextStageFor(assignment),
+      stages: stagesFor(assignment, entry.stages),
       // Teammate progress reads the mapping table too, so a partner's row and
       // the athlete's own cannot disagree about what counts as done.
       teammates: teammates.map((mate) => {
@@ -164,6 +172,11 @@ export class HjudgeCheckinService {
           nextStage: nextStageFor(theirs),
           wristbandIssued: Boolean(theirs.wristband.trim()),
           transponderIssued: Boolean(theirs.transponder.trim()),
+          // Same reading for a partner as for the athlete, for the counters
+          // that ask a teammate's progress this way round. A doubles pair whose
+          // two rows answered in different shapes is how one of them ends up
+          // showing "Waiting" with the band already on their wrist.
+          stages: stagesFor(theirs, mate.stages),
         };
       }),
       teamWarning: doubles ? teamWarning(entry, teammates) : null,
