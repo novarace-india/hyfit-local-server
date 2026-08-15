@@ -51,13 +51,18 @@ export function validateStationOutcome(stationNumber: number, outcome: StationOu
   return outcome === 'none' && penaltySeconds === 0;
 }
 
+// Counted in COLOURS, not percent: 0–5 correct is +30s, 6–9 costs nothing, all
+// ten pays a 30s bonus. Must stay in step with `cognitiveAdjustment` in
+// `backend/src/hyfit-judge/hjudge-race-rules.ts`, which is what actually writes
+// `cognitiveskillpenalty` — this copy only draws the judge's screen. The percent
+// form both once used disagreed with itself at six of ten (= 60%).
 export function cognitiveAdjustment(response: string[], sequence: string[]) {
-  const { scoreSequence } = require('./cognitive-sequence');
+  const { scoreSequence, cognitiveSequenceLength } = require('./cognitive-sequence');
   const score = scoreSequence(response, sequence);
   return {
     ...score,
-    penaltySeconds: score.percentage <= 60 ? 30 : 0,
-    bonusSeconds: score.percentage === 100 ? 30 : 0,
+    penaltySeconds: score.correctCount <= 5 ? 30 : 0,
+    bonusSeconds: score.correctCount === cognitiveSequenceLength ? 30 : 0,
   };
 }
 

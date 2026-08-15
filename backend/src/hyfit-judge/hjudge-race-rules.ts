@@ -62,12 +62,26 @@ export function scoreSequence(response: string[], sequence: string[]) {
   };
 }
 
+/**
+ * The event's cognitive rule, counted in COLOURS rather than percent:
+ * nought to five correct is +30s, six to nine costs nothing, all ten pays a
+ * 30s bonus.
+ *
+ * Counting the colours is what the rule is actually written in. The percent
+ * form this used to be — `percentage <= 60` — charged a penalty at six of ten,
+ * because six of ten IS 60%, while the tablet's own screens (`race_format.dart`)
+ * had already moved to counting colours and showed the athlete nothing. Six
+ * correct was the single value where the judge's screen and the stored
+ * `cognitiveskillpenalty` disagreed, and the server's answer is the one that
+ * reaches RaceResult. Keep this in `correctCount`: it is the only form in which
+ * the two cannot drift apart again.
+ */
 export function cognitiveAdjustment(response: string[], sequence: string[]) {
   const score = scoreSequence(response, sequence);
   return {
     ...score,
-    penaltySeconds: score.percentage <= 60 ? 30 : 0,
-    bonusSeconds: score.percentage === 100 ? 30 : 0,
+    penaltySeconds: score.correctCount <= 5 ? 30 : 0,
+    bonusSeconds: score.correctCount === cognitiveSequenceLength ? 30 : 0,
   };
 }
 

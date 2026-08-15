@@ -324,14 +324,30 @@ describe('HjudgeRaceSubmitService', () => {
       expect(valueOf('cognitiveskillpenalty')).toBe('0');
     });
 
-    it('applies the penalty at or below 60 percent', async () => {
+    it('applies the penalty at five correct, the top of the penalty band', async () => {
       await withResponse(['R', 'G', 'B', 'Y', 'R', 'X', 'X', 'X', 'X', 'X']);
       expect(valueOf('cognitiveskillpenalty')).toBe('30');
       expect(valueOf('cognitiveskillbonus')).toBe('0');
     });
 
+    // The boundary the percent form got wrong, and the reason it went unnoticed
+    // for as long as it did: six of ten is 60%, so `percentage <= 60` charged a
+    // penalty here while the judge's tablet — already counting colours — showed
+    // the athlete nothing. Six correct costs nothing. Do not delete this case.
+    it('charges nothing at six correct, the bottom of the clear band', async () => {
+      await withResponse(['R', 'G', 'B', 'Y', 'R', 'G', 'X', 'X', 'X', 'X']);
+      expect(valueOf('cognitiveskillpenalty')).toBe('0');
+      expect(valueOf('cognitiveskillbonus')).toBe('0');
+    });
+
     it('does neither in between', async () => {
       await withResponse(['R', 'G', 'B', 'Y', 'R', 'G', 'B', 'X', 'X', 'X']);
+      expect(valueOf('cognitiveskillpenalty')).toBe('0');
+      expect(valueOf('cognitiveskillbonus')).toBe('0');
+    });
+
+    it('charges nothing at nine correct, the top of the clear band', async () => {
+      await withResponse(['R', 'G', 'B', 'Y', 'R', 'G', 'B', 'Y', 'R', 'X']);
       expect(valueOf('cognitiveskillpenalty')).toBe('0');
       expect(valueOf('cognitiveskillbonus')).toBe('0');
     });
