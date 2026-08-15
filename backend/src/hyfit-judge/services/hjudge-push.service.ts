@@ -13,12 +13,18 @@ import { HjudgeDbService } from '../hjudge-db.service';
 import { HjudgeResultsService } from './hjudge-results.service';
 import {
   HJUDGE_PUSH_INTERVALS,
+  HJUDGE_PUSH_INTERVAL_DEFAULT,
+  HJUDGE_PUSH_INTERVAL_MAX,
+  HJUDGE_PUSH_INTERVAL_MIN,
   hjudgeSyncConfig,
 } from '../hjudge-sync.config';
 import {
   chunkByBytes,
   decodeSyncCredential,
+  defaultIngestEndpoint,
   normaliseBaseUrl,
+  parseIngestEndpoint,
+  rehostEndpoint,
 } from '../hjudge-sync-credential.util';
 
 export type PushKind = 'athletes' | 'results' | 'results_final';
@@ -38,6 +44,11 @@ interface TargetRow {
   id: string;
   event_id: string;
   base_url: string;
+  /** The two endpoints as prod issued them, without their `?k=`. Empty on a
+   *  binding made before 087, or one made from the short code — `endpointFor`
+   *  falls back to building one. */
+  athletes_url: string;
+  results_url: string;
   remote_event_id: string;
   remote_event_name: string;
   token: string;
@@ -140,6 +151,10 @@ export class HjudgePushService {
       event,
       counts,
       intervals: HJUDGE_PUSH_INTERVALS,
+      intervalBounds: {
+        min: HJUDGE_PUSH_INTERVAL_MIN,
+        max: HJUDGE_PUSH_INTERVAL_MAX,
+      },
       // Never `token`. The console shows the prefix so an operator can tell
       // which credential is bound; the secret has no reader on this screen.
       target: target ? this.publicTarget(target) : null,
@@ -148,29 +163,130 @@ export class HjudgePushService {
   }
 
   /**
-   * Bind this event to a prod event, from a pasted connection code.
+   * Bind this event to a prod event.
    *
-   * The handshake is not a formality. It is the only step that can catch a
+   * TWO ENDPOINTS, PASTED SEPARATELY. Prod issues one URL for the participants
+   * and one for the standings, and both are now stored as pasted. Before 087
+   * this took a single paste and rebuilt both URLs from its origin and event
+   * id, which meant the results endpoint an operator supplied was parsed for
+   * its credential and then discarded — and if prod served that route from
+   * anywhere but the path this code invents, the push went to the invented one
+   * with nothing on any screen to show it.
+   *
+   * THE SHORT CODE STILL WORKS. `code` remains, for the one-paste flow and for
+   * anything already automated against it; the endpoints are then derived, as
+   * before, because a code genuinely carries nothing else.
+   *
+   * THE HANDSHAKE IS NOT A FORMALITY. It is the only step that can catch a
    * credential minted for a different race — last month's event, the other
    * venue's — and every individual call after it would succeed while quietly
-   * overwriting standings that are already public. So the code is decoded, prod
-   * is asked what it opens, and what comes back is stored and shown.
+   * overwriting standings that are already public. So prod is asked what the
+   * credential opens, and what comes back is stored and shown.
    */
-  async bind(eventId: string, body: { code?: string; baseUrl?: string }) {
+  async bind(
+    eventId: string,
+    body: {
+      code?: string;
+      baseUrl?: string;
+      athletesUrl?: string;
+      resultsUrl?: string;
+      intervalMinutes?: number;
+    },
+  ) {
     this.assertLocalRole();
     await this.assertOfflineEvent(eventId);
 
-    let credential;
-    try {
-      credential = decodeSyncCredential(String(body?.code ?? ''));
-    } catch (error: any) {
-      throw new BadRequestException(error?.message ?? 'Unreadable connection code');
+    const pastedAthletes = String(body?.athletesUrl ?? '').trim();
+    const pastedResults = String(body?.resultsUrl ?? '').trim();
+    const twoBox = Boolean(pastedAthletes || pastedResults);
+
+    let credential: {
+      baseUrl: string;
+      eventId: string;
+      eventName: string;
+      token: string;
+      expiresAt: string;
+    };
+    let athletesUrl = '';
+    let resultsUrl = '';
+
+    if (twoBox) {
+      // Both, or neither. One endpoint and a blank is a binding that half
+      // works — and the half that silently does not is whichever box was left
+      // empty, discovered mid-event.
+      if (!pastedAthletes || !pastedResults) {
+        throw new BadRequestException(
+          pastedAthletes
+            ? 'The results endpoint is missing — prod issues two, and this server needs both'
+            : 'The participants endpoint is missing — prod issues two, and this server needs both',
+        );
+      }
+
+      let athletes, results;
+      try {
+        athletes = parseIngestEndpoint(pastedAthletes, 'athletes');
+        results = parseIngestEndpoint(pastedResults, 'results');
+      } catch (error: any) {
+        throw new BadRequestException(error?.message ?? 'Unreadable endpoint');
+      }
+
+      // One credential opens both routes — that is what prod mints, and this
+      // row holds one token. Two different `?k=` values mean two credentials,
+      // and storing one of them would make the other endpoint fail on every
+      // push with a 401 nobody would connect to the box they pasted it into.
+      if (athletes.token !== results.token) {
+        throw new BadRequestException(
+          'Those two endpoints carry different credentials. Prod issues one code with two routes — copy both lines from the same "Create connection code" result.',
+        );
+      }
+      if (athletes.eventId !== results.eventId) {
+        throw new BadRequestException(
+          'Those two endpoints are for different events on prod. Copy both lines from the same result.',
+        );
+      }
+
+      athletesUrl = athletes.url;
+      resultsUrl = results.url;
+      credential = {
+        baseUrl: athletes.baseUrl,
+        eventId: athletes.eventId,
+        eventName: '',
+        token: athletes.token,
+        // Not carried by a URL; the handshake supplies it.
+        expiresAt: '',
+      };
+    } else {
+      try {
+        credential = decodeSyncCredential(String(body?.code ?? ''));
+      } catch (error: any) {
+        throw new BadRequestException(
+          error?.message ?? 'Unreadable connection code',
+        );
+      }
     }
 
-    // An override for the case the code was minted before prod knew the address
-    // the venue can actually reach it on — a staging host, an IP, a tunnel.
+    // An override for the case the endpoints were minted before prod knew the
+    // address the venue can actually reach it on — a staging host, an IP, a
+    // tunnel. It moves the endpoints with it; see `rehostEndpoint`.
     const override = normaliseBaseUrl(String(body?.baseUrl ?? ''));
     const baseUrl = override || credential.baseUrl;
+
+    if (!athletesUrl) {
+      athletesUrl = defaultIngestEndpoint(baseUrl, credential.eventId, 'athletes');
+      resultsUrl = defaultIngestEndpoint(baseUrl, credential.eventId, 'results');
+    } else if (override) {
+      athletesUrl = rehostEndpoint(athletesUrl, baseUrl);
+      resultsUrl = rehostEndpoint(resultsUrl, baseUrl);
+    }
+
+    // Offered on the connect form, so a venue sets its cadence in the same act
+    // as connecting rather than finding the control afterwards. Absent leaves
+    // the column's default.
+    const interval =
+      body?.intervalMinutes === undefined
+        ? null
+        : this.validInterval(body.intervalMinutes);
+    const existing = await this.target(eventId);
 
     const handshake = await this.handshake(
       baseUrl,
@@ -192,17 +308,21 @@ export class HjudgePushService {
 
     await this.db.q(
       `INSERT INTO event_push_targets
-         (event_id, base_url, remote_event_id, remote_event_name,
-          token, token_prefix, token_expires_at, enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::timestamptz, true)
+         (event_id, base_url, athletes_url, results_url,
+          remote_event_id, remote_event_name,
+          token, token_prefix, token_expires_at, enabled, interval_minutes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::timestamptz, true, $10)
        ON CONFLICT (event_id) DO UPDATE SET
          base_url          = excluded.base_url,
+         athletes_url      = excluded.athletes_url,
+         results_url       = excluded.results_url,
          remote_event_id   = excluded.remote_event_id,
          remote_event_name = excluded.remote_event_name,
          token             = excluded.token,
          token_prefix      = excluded.token_prefix,
          token_expires_at  = excluded.token_expires_at,
          enabled           = true,
+         interval_minutes  = excluded.interval_minutes,
          -- A new credential is a new connection: what the old one had already
          -- sent says nothing about what THIS prod event holds, and leaving the
          -- fingerprint behind would skip the first results push as unchanged.
@@ -218,11 +338,16 @@ export class HjudgePushService {
       [
         eventId,
         baseUrl,
+        athletesUrl,
+        resultsUrl,
         credential.eventId,
         String(remoteEvent.name ?? credential.eventName ?? ''),
         credential.token,
         credential.token.slice(0, 18),
         expiresAt ?? '',
+        // What the form asked for; otherwise whatever this event was already
+        // set to, and only failing that the default a fresh venue gets.
+        interval ?? existing?.interval_minutes ?? HJUDGE_PUSH_INTERVAL_DEFAULT,
       ],
     );
 
@@ -244,7 +369,9 @@ export class HjudgePushService {
     return { unbound: (removed.rowCount ?? 0) > 0 };
   }
 
-  /** The interval dropdown and the pause switch. */
+  /** The endpoint boxes, the interval, and the pause switch. Every field is
+   *  optional and only what is present changes — the screen sends one at a
+   *  time, so a save must never carry a stale copy of the others. */
   async configure(
     eventId: string,
     body: {
@@ -252,20 +379,17 @@ export class HjudgePushService {
       enabled?: boolean;
       autoImportResults?: boolean;
       baseUrl?: string;
+      athletesUrl?: string;
+      resultsUrl?: string;
     },
   ) {
     this.assertLocalRole();
     const target = await this.requireTarget(eventId);
 
-    let interval = target.interval_minutes;
-    if (body?.intervalMinutes !== undefined) {
-      interval = Number(body.intervalMinutes);
-      if (!(HJUDGE_PUSH_INTERVALS as readonly number[]).includes(interval)) {
-        throw new BadRequestException(
-          `Interval must be one of: ${HJUDGE_PUSH_INTERVALS.join(', ')} minutes (0 = manual only)`,
-        );
-      }
-    }
+    const interval =
+      body?.intervalMinutes === undefined
+        ? target.interval_minutes
+        : this.validInterval(body.intervalMinutes);
 
     const enabled =
       body?.enabled === undefined ? target.enabled : Boolean(body.enabled);
@@ -284,6 +408,9 @@ export class HjudgePushService {
     // holds the prod console, in the middle of a race, to re-issue a credential
     // that was never the thing that broke.
     let baseUrl = target.base_url;
+    let athletesUrl = this.endpointFor(target, 'athletes');
+    let resultsUrl = this.endpointFor(target, 'results');
+
     if (body?.baseUrl !== undefined) {
       baseUrl = normaliseBaseUrl(String(body.baseUrl));
       if (!baseUrl) {
@@ -291,15 +418,58 @@ export class HjudgePushService {
           'That is not a usable server address — give the origin, like https://app.example.com',
         );
       }
+      // Both endpoints move with it, or this control is a no-op on the only
+      // thing it exists to fix: the push would keep calling the old host while
+      // the screen showed the new one.
+      athletesUrl = rehostEndpoint(athletesUrl, baseUrl);
+      resultsUrl = rehostEndpoint(resultsUrl, baseUrl);
+    }
+
+    // Either endpoint, on its own, without re-pasting the other or going back
+    // to prod for a fresh credential. The token on a re-pasted URL is checked
+    // against the bound one rather than replacing it: a different credential is
+    // a different connection, and that is what Connect is for.
+    const endpoint = (raw: string, route: 'athletes' | 'results') => {
+      let parsed;
+      try {
+        parsed = parseIngestEndpoint(raw, route);
+      } catch (error: any) {
+        throw new BadRequestException(error?.message ?? 'Unreadable endpoint');
+      }
+      if (parsed.token !== target.token) {
+        throw new BadRequestException(
+          'That endpoint carries a different credential from the one this event is connected with. Press Disconnect and connect again with the new pair.',
+        );
+      }
+      return parsed;
+    };
+
+    if (body?.athletesUrl !== undefined) {
+      athletesUrl = endpoint(String(body.athletesUrl), 'athletes').url;
+    }
+    if (body?.resultsUrl !== undefined) {
+      const parsed = endpoint(String(body.resultsUrl), 'results');
+      resultsUrl = parsed.url;
+      // The standings are the half that changes, so a corrected results
+      // endpoint has to send on the next tick even though the rows are the same
+      // rows. Without this the fingerprint says "unchanged since the last push"
+      // and the new endpoint is never called — which is the failure this whole
+      // change is about, reappearing one screen later.
+      await this.db.q(
+        `UPDATE event_push_targets SET results_fingerprint = NULL
+          WHERE event_id = $1`,
+        [eventId],
+      );
     }
 
     const row = await this.db.q1<TargetRow>(
       `UPDATE event_push_targets
           SET interval_minutes = $2, enabled = $3, auto_import_results = $4,
-              base_url = $5, updated_at = now()
+              base_url = $5, athletes_url = $6, results_url = $7,
+              updated_at = now()
         WHERE event_id = $1
         RETURNING *`,
-      [eventId, interval, enabled, autoImport, baseUrl],
+      [eventId, interval, enabled, autoImport, baseUrl, athletesUrl, resultsUrl],
     );
     return { target: this.publicTarget(row!) };
   }
@@ -724,8 +894,12 @@ export class HjudgePushService {
     return { chunks: chunks.length, bytes };
   }
 
-  private async post(target: TargetRow, path: string, payload: string) {
-    const url = `${target.base_url}/api/hyfit-judge/ingest/events/${target.remote_event_id}/${path}`;
+  private async post(
+    target: TargetRow,
+    path: 'athletes' | 'results',
+    payload: string,
+  ) {
+    const url = this.endpointFor(target, path);
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
@@ -764,9 +938,11 @@ export class HjudgePushService {
       }
       // A DNS failure, a refused connection, a dead venue link. The cause is
       // the message an operator can act on, so it is carried rather than
-      // flattened into a 500.
+      // flattened into a 500 — and it names the ENDPOINT rather than the base
+      // URL, because the two can now differ and "could not reach prod" is a
+      // useless thing to read when one of the two endpoints is the wrong one.
       throw new BadGatewayException(
-        `Could not reach ${target.base_url}: ${error?.message ?? error}`,
+        `Could not reach ${url}: ${error?.message ?? error}`,
       );
     } finally {
       clearTimeout(timer);
@@ -884,12 +1060,51 @@ export class HjudgePushService {
     return target;
   }
 
-  /** The row minus its secret. Everything that reads a target for a response
-   *  goes through here, so `token` has one place it could leak from and it does
-   *  not. */
+  /** Where a route's push actually goes.
+   *
+   *  The stored endpoint is the authority. The fallback is for a binding made
+   *  before 087 on a database whose backfill has not run, and for one made from
+   *  the short code, which carries no paths — it rebuilds what this codebase
+   *  has always built, so those bindings keep behaving exactly as they did. */
+  private endpointFor(target: TargetRow, route: 'athletes' | 'results'): string {
+    const stored = String(
+      (route === 'athletes' ? target.athletes_url : target.results_url) ?? '',
+    ).trim();
+    return (
+      stored ||
+      defaultIngestEndpoint(target.base_url, target.remote_event_id, route)
+    );
+  }
+
+  /** Any whole number of minutes inside the column's CHECK. See migration 087
+   *  for why this is a range and not the old enumerated list. */
+  private validInterval(input: unknown): number {
+    const minutes = Number(input);
+    if (
+      !Number.isInteger(minutes) ||
+      minutes < HJUDGE_PUSH_INTERVAL_MIN ||
+      minutes > HJUDGE_PUSH_INTERVAL_MAX
+    ) {
+      throw new BadRequestException(
+        `Push every how many minutes? A whole number from ${HJUDGE_PUSH_INTERVAL_MIN} to ${HJUDGE_PUSH_INTERVAL_MAX} (0 = manual only).`,
+      );
+    }
+    return minutes;
+  }
+
+  /** The row minus its secret, plus the two endpoints resolved.
+   *
+   *  Everything that reads a target for a response goes through here, so
+   *  `token` has one place it could leak from and it does not — and the screen
+   *  is shown the URLs the pushes will really use rather than the raw columns,
+   *  which are empty on a pre-087 binding. */
   private publicTarget(target: TargetRow) {
     const { token: _secret, ...rest } = target;
-    return rest;
+    return {
+      ...rest,
+      athletes_url: this.endpointFor(target, 'athletes'),
+      results_url: this.endpointFor(target, 'results'),
+    };
   }
 
   private async assertOfflineEvent(eventId: string) {

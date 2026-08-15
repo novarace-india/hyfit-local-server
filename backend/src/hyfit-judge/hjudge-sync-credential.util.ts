@@ -180,8 +180,129 @@ function fromUrl(input: string): HjudgeSyncCredential {
   };
 }
 
-/** Origin only, no trailing slash, no path. The push service appends the API
- *  path itself; a base URL that already carried one would produce
+/**
+ * One pasted endpoint, kept whole.
+ *
+ * WHY THIS EXISTS ALONGSIDE `decodeSyncCredential`. That function answers "what
+ * credential is this?" and deliberately discards everything else — origin,
+ * event id and token out, path thrown away. That is right for binding, and it
+ * is exactly wrong for storing where a push goes: the endpoint prod issued is
+ * the endpoint the push has to hit, and rebuilding it from parts means the
+ * sender is guessing a path rather than using the one it was given. The guess
+ * held for as long as both deployments ran this code at the same prefix.
+ *
+ * So this returns the URL as pasted, minus its `?k=` — the token comes back
+ * separately and travels as a Bearer header, and a URL kept with the secret
+ * still on it would put that secret on every screen that renders the endpoint.
+ *
+ * `expect` names which of the two routes this is meant to be, and is used only
+ * to say so when the paste is obviously the other one. It is not enforced
+ * beyond that: a venue whose prod publishes results under some other path is
+ * not making a mistake, and refusing them on a substring check would be this
+ * code guessing again.
+ */
+export interface HjudgeIngestEndpoint {
+  /** The URL to POST to, no credential on it. */
+  url: string;
+  /** Origin of `url`, for the handshake and for the console. */
+  baseUrl: string;
+  /** The event id ON PROD, from the `/events/<id>/` segment. */
+  eventId: string;
+  token: string;
+}
+
+export function parseIngestEndpoint(
+  input: string,
+  expect?: 'athletes' | 'results',
+): HjudgeIngestEndpoint {
+  const compact = String(input ?? '')
+    .trim()
+    .replace(/\s+/g, '');
+  const what = expect === 'results' ? 'results' : 'participants';
+
+  if (!compact) {
+    throw new Error(`Paste the ${what} endpoint prod gave you for this event`);
+  }
+  if (!/^https?:\/\//i.test(compact)) {
+    throw new Error(
+      `The ${what} endpoint is a URL starting with https:// — this does not`,
+    );
+  }
+
+  let url: URL;
+  try {
+    url = new URL(compact);
+  } catch {
+    throw new Error(`That ${what} endpoint is not a readable URL — copy it again`);
+  }
+
+  const token = (url.searchParams.get('k') ?? '').trim();
+  if (!token) {
+    throw new Error(
+      `The ${what} endpoint has no credential on it. Copy the whole line including the ?k= part — it is the half that makes it work.`,
+    );
+  }
+
+  // The segment AFTER `events`, so the same paste works with or without a
+  // trailing route. If prod ever publishes these under a path with no `events`
+  // segment at all, the operator can still bind with the short code.
+  const parts = url.pathname.split('/').filter(Boolean);
+  const at = parts.indexOf('events');
+  const eventId = at === -1 ? '' : (parts[at + 1] ?? '');
+  if (!eventId) {
+    throw new Error(
+      `That ${what} endpoint names no event — copy it again from prod`,
+    );
+  }
+
+  // The one mix-up worth catching, because it is silent otherwise: the same URL
+  // pasted into both boxes sends the roster to the results route and back.
+  const other = expect === 'results' ? 'athletes' : 'results';
+  if (expect && new RegExp(`/${other}/?$`).test(url.pathname)) {
+    throw new Error(
+      `That is the ${other === 'results' ? 'results' : 'participants'} endpoint, pasted into the ${what} box — the two are different URLs.`,
+    );
+  }
+
+  url.searchParams.delete('k');
+  // `URL.toString()` leaves a bare `?` behind once the only parameter is gone.
+  const clean = url.toString().replace(/\?$/, '');
+
+  return { url: clean, baseUrl: url.origin, eventId, token };
+}
+
+/** The endpoint this codebase would build for a route, used when a binding
+ *  carries no explicit URL — an old row, or a bind from the short code. Kept
+ *  beside `encodeSyncUrl` so the two cannot drift on the path shape. */
+export function defaultIngestEndpoint(
+  baseUrl: string,
+  eventId: string,
+  route: 'athletes' | 'results',
+): string {
+  return `${normaliseBaseUrl(baseUrl)}/api/hyfit-judge/ingest/events/${eventId}/${route}`;
+}
+
+/** Move an endpoint onto another origin, keeping its path and query.
+ *
+ *  This is what "Change server address" does to the two stored endpoints. The
+ *  alternative — leaving them pointing at the old host — makes that control a
+ *  no-op on the only field it exists to fix. */
+export function rehostEndpoint(url: string, baseUrl: string): string {
+  const origin = normaliseBaseUrl(baseUrl);
+  if (!origin || !url) return url;
+  try {
+    const parsed = new URL(url);
+    const next = new URL(origin);
+    parsed.protocol = next.protocol;
+    parsed.host = next.host;
+    return parsed.toString().replace(/\?$/, '');
+  } catch {
+    return url;
+  }
+}
+
+/** Origin only, no trailing slash, no path. The handshake appends the API path
+ *  itself; a base URL that already carried one would produce
  *  `/api/api/hyfit-judge/...` and a 404 nobody would read as a typo. */
 export function normaliseBaseUrl(input: string): string {
   const raw = String(input ?? '').trim();

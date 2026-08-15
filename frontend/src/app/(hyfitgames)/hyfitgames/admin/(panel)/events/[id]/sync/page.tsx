@@ -48,6 +48,12 @@ type Credential = {
 
 type Target = {
     base_url: string;
+    // The two URLs this server really POSTs to, as prod issued them and as the
+    // operator may correct them, without their `?k=`. Before these existed the
+    // sender rebuilt both from `base_url` and the event id, which is why a
+    // pasted results endpoint appeared to do nothing.
+    athletes_url: string;
+    results_url: string;
     remote_event_id: string;
     remote_event_name: string;
     token_prefix: string;
@@ -85,7 +91,9 @@ type State = {
     roleWasUnrecognised: boolean;
     event: { id: string; name: string; delivery_mode: DeliveryMode; results_mode: string };
     counts: { athletes: number; results: number };
+    /** Quick picks beside the minutes box — suggestions, not the allowed set. */
     intervals: number[];
+    intervalBounds: { min: number; max: number };
     credentials: Credential[];
     remoteCounts: { athletes: number; results: number };
     target: Target | null;
@@ -441,6 +449,183 @@ function EndpointField({
     );
 }
 
+/* How often the standings go up, as a number of minutes.
+ *
+ * A BOX AND NOT A DROPDOWN. The dropdown offered nine values and the column's
+ * CHECK enforced the same nine, so a venue asking to push every seven minutes
+ * got a constraint name. The nine are still here as one-tap presets — they are
+ * good defaults and tapping beats typing at a venue — but they are suggestions
+ * now, and anything from 0 (manual only) to a day is a valid answer.
+ *
+ * UNCONTROLLED-ISH ON PURPOSE: the value is held as a STRING while the operator
+ * types, because a number input mid-edit is legitimately "" or "1" on the way
+ * to "15", and coercing each keystroke to a number makes the field fight back. */
+function IntervalField({
+    minutes,
+    onChange,
+    onCommit,
+    presets,
+    bounds,
+    disabled,
+    step,
+    hint,
+}: {
+    minutes: string;
+    onChange: (value: string) => void;
+    onCommit?: (value: number) => void;
+    presets: number[];
+    bounds: { min: number; max: number };
+    disabled: boolean;
+    step?: string;
+    hint?: string;
+}) {
+    const parsed = Number(minutes);
+    const valid =
+        minutes.trim() !== "" &&
+        Number.isInteger(parsed) &&
+        parsed >= bounds.min &&
+        parsed <= bounds.max;
+
+    const commit = (value: number) => {
+        onChange(String(value));
+        onCommit?.(value);
+    };
+
+    return (
+        <div className="text-xs">
+            <span className="font-bold uppercase tracking-widest text-fog">
+                {step ? `${step} · ` : ""}Push results every
+            </span>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+                <input
+                    type="number"
+                    inputMode="numeric"
+                    min={bounds.min}
+                    max={bounds.max}
+                    step={1}
+                    value={minutes}
+                    disabled={disabled}
+                    onChange={(e) => onChange(e.target.value)}
+                    // Committed on blur and on Enter rather than per keystroke:
+                    // a PUT for every digit of "15" would also push "1".
+                    onBlur={() => valid && onCommit?.(parsed)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter" && valid) {
+                            e.currentTarget.blur();
+                        }
+                    }}
+                    className="w-24 rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred disabled:opacity-40"
+                />
+                <span className="text-sm text-fog">minutes</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+                {presets.map((m) => (
+                    <button
+                        key={m}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => commit(m)}
+                        className={`rounded-lg border px-2 py-1 text-[11px] font-bold uppercase tracking-widest transition disabled:opacity-40 ${
+                            parsed === m ? "border-hyred bg-hyred/10 text-chalk" : "border-smoke text-fog hover:text-chalk"
+                        }`}
+                    >
+                        {m === 0 ? "Manual" : `${m}m`}
+                    </button>
+                ))}
+            </div>
+            <p className="mt-1.5 text-fog">
+                {!valid && minutes.trim() !== ""
+                    ? `A whole number of minutes from ${bounds.min} to ${bounds.max}.`
+                    : parsed === 0
+                      ? "Manual only — the standings go up when somebody presses Push results."
+                      : (hint ??
+                        `Every ${parsed} minute${parsed === 1 ? "" : "s"}, on this server's own timer — closing the console does not stop it.`)}
+            </p>
+        </div>
+    );
+}
+
+/* One stored endpoint, shown and editable in place.
+ *
+ * Shown WITHOUT its `?k=`, because this is a screen and the key is a password;
+ * the credential is bound already and pasting a fresh URL only changes the
+ * address. A paste carrying a DIFFERENT credential is refused by the backend
+ * with the reason, rather than half-rebinding the event. */
+function EditableEndpoint({
+    title,
+    destination,
+    url,
+    busy,
+    onSave,
+}: {
+    title: string;
+    destination: string;
+    url: string;
+    busy: boolean;
+    onSave: (next: string) => Promise<void>;
+}) {
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState(url);
+
+    return (
+        <div className="rounded-lg border border-smoke bg-ink p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                    <span className="text-xs font-bold uppercase tracking-widest text-fog">{title}</span>
+                    <span className="mt-0.5 block text-xs text-fog">{destination}</span>
+                </div>
+                {!editing && (
+                    <button
+                        onClick={() => {
+                            setDraft(url);
+                            setEditing(true);
+                        }}
+                        className="text-xs font-bold uppercase tracking-widest text-fog underline hover:text-chalk"
+                    >
+                        Change
+                    </button>
+                )}
+            </div>
+
+            {editing ? (
+                <>
+                    <textarea
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                        rows={3}
+                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…?k=…"
+                        className="mt-2 w-full break-all rounded-lg border border-smoke bg-coal px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
+                    />
+                    <span className="mt-1 block text-xs text-fog">
+                        Paste the whole line including the <code>?k=</code>. It must be the same credential this event
+                        is already connected with.
+                    </span>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                            onClick={async () => {
+                                await onSave(draft.trim());
+                                setEditing(false);
+                            }}
+                            disabled={busy || !draft.trim()}
+                            className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                        >
+                            Save
+                        </button>
+                        <button
+                            onClick={() => setEditing(false)}
+                            className="text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </>
+            ) : (
+                <p className="mt-2 break-all font-mono text-xs text-chalk">{url || "— not set —"}</p>
+            )}
+        </div>
+    );
+}
+
 /* -------------------------------------------------------------------- prod */
 
 function ProdPanel({
@@ -625,8 +810,9 @@ function ProdPanel({
                         </div>
 
                         <p className="mt-3 text-xs text-fog">
-                            Both carry the same credential, so pasting either one into the venue server connects it for
-                            both. The <code>?k=</code> is the key — copy each line whole, and treat it as a password.
+                            Copy <span className="font-bold text-chalk">both</span> — the venue server has a box for
+                            each, and stores each one as sent rather than rebuilding it. They carry the same credential;
+                            the <code>?k=</code> is the key, so copy each line whole and treat it as a password.
                         </p>
 
                         {/* The same credential, compact. A long URL with a key
@@ -720,22 +906,58 @@ function LocalPanel({
     busy: string;
     act: (key: string, fn: () => Promise<string>) => Promise<void>;
 }) {
+    // Two boxes, because prod issues two endpoints and they are two different
+    // destinations. The old single box parsed whichever one you pasted for its
+    // credential and then rebuilt both URLs itself — so a results endpoint that
+    // did not match what this code would have invented was accepted, stored
+    // nowhere, and never called.
+    const [athletesUrl, setAthletesUrl] = useState("");
+    const [resultsUrl, setResultsUrl] = useState("");
     const [code, setCode] = useState("");
     const [baseUrl, setBaseUrl] = useState("");
-    // Changing where an already-bound event pushes, without re-pasting a code:
+    // What the box shows. Seeded from the binding when there is one, so the
+    // connected panel opens on the interval this event is actually running.
+    const [minutes, setMinutes] = useState(String(state.target?.interval_minutes ?? 5));
+    // Changing where an already-bound event pushes, without re-pasting anything:
     // a tunnel restarting on a new host is not a reason to go back to whoever
     // holds the prod console for a fresh credential.
     const [editingUrl, setEditingUrl] = useState(false);
     const [urlDraft, setUrlDraft] = useState("");
     const target = state.target;
+    const savedMinutes = target?.interval_minutes;
+
+    // Follow the server's value, not every refetch. The page reloads itself
+    // every twenty seconds while a bound event is pushing, and re-seeding the
+    // box on each of those would erase a half-typed number under the operator's
+    // hands. This only fires when the SAVED interval actually changed — which
+    // is either their own commit landing, or somebody on another console.
+    useEffect(() => {
+        if (savedMinutes !== undefined) setMinutes(String(savedMinutes));
+    }, [savedMinutes]);
 
     const bind = () =>
         act("bind", async () => {
+            // The two-endpoint form is what the screen leads with; the short
+            // code stays as a fallback and wins only when the boxes are empty.
+            const pasted = athletesUrl.trim() || resultsUrl.trim();
+            const parsed = Number(minutes);
             const bound = await judgeApi<{ remote: { event: { name: string } } }>(scoped("/admin/sync/bind"), {
                 method: "POST",
-                body: JSON.stringify({ code, baseUrl: baseUrl.trim() || undefined }),
+                body: JSON.stringify({
+                    ...(pasted
+                        ? { athletesUrl: athletesUrl.trim(), resultsUrl: resultsUrl.trim() }
+                        : { code }),
+                    baseUrl: baseUrl.trim() || undefined,
+                    // Omitted rather than coerced when the box is empty:
+                    // `Number("")` is 0, and 0 means "manual only" — a blank
+                    // field must not quietly switch the timer off.
+                    intervalMinutes:
+                        minutes.trim() !== "" && Number.isInteger(parsed) ? parsed : undefined,
+                }),
             });
             setCode("");
+            setAthletesUrl("");
+            setResultsUrl("");
             return `Connected to "${bound.remote.event.name}" on prod`;
         });
 
@@ -774,9 +996,14 @@ function LocalPanel({
         enabled?: boolean;
         autoImportResults?: boolean;
         baseUrl?: string;
+        athletesUrl?: string;
+        resultsUrl?: string;
     }) =>
         act("configure", async () => {
             await judgeApi(scoped("/admin/sync/config"), { method: "PUT", body: JSON.stringify(patch) });
+            if (patch.athletesUrl !== undefined) return "Participants endpoint saved";
+            if (patch.resultsUrl !== undefined)
+                return "Results endpoint saved — the next push goes there, even if the standings have not changed";
             if (patch.baseUrl !== undefined) return `Now pushing to ${patch.baseUrl}`;
             if (patch.enabled !== undefined)
                 return patch.enabled ? "Automatic pushes resumed" : "Automatic pushes paused";
@@ -786,46 +1013,80 @@ function LocalPanel({
                     : "Only what you import by hand will be pushed";
             return patch.intervalMinutes === 0
                 ? "Results will now be pushed only when you press Push results"
-                : `Results will be pushed every ${patch.intervalMinutes} minutes`;
+                : `Results will be pushed every ${patch.intervalMinutes} minute${patch.intervalMinutes === 1 ? "" : "s"}`;
         });
 
     if (!target) {
-        const peek = peekCode(code);
-        // The address the code carries, unless the operator has typed over it.
+        const peek = peekCode(athletesUrl || resultsUrl || code);
+        // The address the endpoints carry, unless the operator has typed over it.
         const effectiveUrl = baseUrl.trim() || peek?.baseUrl || "";
+        const usingCode = !athletesUrl.trim() && !resultsUrl.trim();
+        const ready = usingCode ? !!code.trim() : !!(athletesUrl.trim() && resultsUrl.trim());
 
         return (
             <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
                 <h2 className="text-sm font-bold uppercase tracking-wide">Connect to prod</h2>
                 <p className="mt-1 text-xs text-fog">
-                    Paste the push endpoint prod gave you for this event, and check the server address it is pointing
-                    at. Nothing is stored until prod confirms which event it opens.
+                    Paste both endpoints prod gave you for this event, set how often the standings should go up, and
+                    check the server address they point at. Nothing is stored until prod confirms which event they open.
                 </p>
 
+                {/* TWO BOXES, BECAUSE THERE ARE TWO ENDPOINTS. They share one
+                    credential but they are two destinations, and each is stored
+                    and called as pasted. The single box this replaces read the
+                    credential off whichever URL you gave it and then rebuilt
+                    both addresses itself — so a results endpoint that did not
+                    match the one this code invents was accepted and then never
+                    used, with nothing on the screen to show it. */}
                 <label className="mt-3 block text-xs">
                     <span className="font-bold uppercase tracking-widest text-fog">
-                        1 · Push endpoint from prod
+                        1 · Participants endpoint
                     </span>
                     <span className="mt-0.5 block text-fog">
-                        Either of the two prod gave you — participants or results. They share one credential, so one
-                        paste connects this server for both.
+                        Where the start list goes — into prod&apos;s database.
                     </span>
                     <textarea
-                        value={code}
-                        onChange={(e) => setCode(e.target.value)}
-                        rows={4}
-                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…?k=…"
+                        value={athletesUrl}
+                        onChange={(e) => setAthletesUrl(e.target.value)}
+                        rows={3}
+                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…/athletes?k=…"
                         className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
                     />
                 </label>
 
-                {/* Not an "override" any more: the address prod is reachable on is
-                    a thing the venue operator owns. The code fills it in, and the
-                    field stays editable because the address prod knows about
-                    itself and the address the venue can reach are routinely
-                    different — a load balancer, a tunnel, a LAN IP. */}
                 <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">2 · Prod server address</span>
+                    <span className="font-bold uppercase tracking-widest text-fog">2 · Results endpoint</span>
+                    <span className="mt-0.5 block text-fog">
+                        Where the standings go — into prod&apos;s cache, on the interval below.
+                    </span>
+                    <textarea
+                        value={resultsUrl}
+                        onChange={(e) => setResultsUrl(e.target.value)}
+                        rows={3}
+                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…/results?k=…"
+                        className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
+                    />
+                </label>
+
+                <div className="mt-3">
+                    <IntervalField
+                        minutes={minutes}
+                        onChange={setMinutes}
+                        presets={state.intervals}
+                        bounds={state.intervalBounds}
+                        disabled={!!busy}
+                        step="3"
+                    />
+                </div>
+
+                {/* Not an "override": the address prod is reachable on is a
+                    thing the venue operator owns. The endpoints fill it in, and
+                    the field stays editable because the address prod knows about
+                    itself and the address the venue can reach are routinely
+                    different — a load balancer, a tunnel, a LAN IP. Changing it
+                    moves both endpoints above onto that host. */}
+                <label className="mt-3 block text-xs">
+                    <span className="font-bold uppercase tracking-widest text-fog">4 · Prod server address</span>
                     <input
                         value={baseUrl}
                         onChange={(e) => setBaseUrl(e.target.value)}
@@ -834,8 +1095,8 @@ function LocalPanel({
                     />
                     <span className="mt-1 block text-fog">
                         {peek?.baseUrl && !baseUrl.trim()
-                            ? "Taken from the endpoint above. Leave it unless this venue reaches prod another way."
-                            : "The origin only — no path. This server must be able to reach it."}
+                            ? "Taken from the endpoints above. Leave it unless this venue reaches prod another way."
+                            : "The origin only — no path. Both endpoints above are moved onto it. This server must be able to reach it."}
                     </span>
                 </label>
 
@@ -857,14 +1118,37 @@ function LocalPanel({
 
                 <button
                     onClick={() => void bind()}
-                    disabled={!!busy || !code.trim()}
+                    disabled={!!busy || !ready}
                     className="mt-3 rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
                 >
                     {busy === "bind" ? "Checking with prod…" : "Connect"}
                 </button>
 
+                {/* The compact form of the same credential. Kept because a long
+                    URL with a key on it survives a chat window less reliably
+                    than one opaque string — but folded away, because it carries
+                    no paths and so binds to the endpoints this code guesses,
+                    which is the thing the two boxes above exist to stop. */}
+                <details className="mt-4 border-t border-smoke pt-3">
+                    <summary className="cursor-pointer text-xs font-bold uppercase tracking-widest text-fog">
+                        Or paste the short connection code instead
+                    </summary>
+                    <textarea
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        rows={3}
+                        placeholder="HYFITSYNC1.…"
+                        className="mt-2 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
+                    />
+                    <span className="mt-1 block text-xs text-fog">
+                        Used only while both boxes above are empty. It carries the server, the event and the
+                        credential — but no paths, so the two endpoints are assembled from the standard routes and can
+                        be corrected afterwards.
+                    </span>
+                </details>
+
                 {/* Everything below only exists once there is somewhere to push
-                    to, so before that this screen is one box and a button — and
+                    to, so before that this screen is a form and a button — and
                     looks like a screen with its controls missing. Name them. */}
                 <div className="mt-4 border-t border-smoke pt-3 text-xs text-fog">
                     <span className="font-bold uppercase tracking-widest">Once connected, this page gains</span>
@@ -874,8 +1158,7 @@ function LocalPanel({
                         </li>
                         <li>
                             <span className="text-chalk">Push results now</span> and the{" "}
-                            <span className="text-chalk">interval dropdown</span> — manual, or every
-                            1/2/3/5/10/20/30/60 minutes
+                            <span className="text-chalk">every N minutes</span> box — either endpoint stays editable
                         </li>
                         <li>
                             <span className="text-chalk">Publish final standings</span> — the one push that writes
@@ -897,15 +1180,12 @@ function LocalPanel({
                         <h2 className="text-sm font-bold uppercase tracking-wide">
                             Connected to {target.remote_event_name || "prod"}
                         </h2>
-                        {/* The two URLs this server will actually call, spelled
-                            out. "Where is it pushing?" is asked whenever a push
-                            fails, and a base URL plus an event id leaves the
-                            operator assembling it in their head. */}
-                        <p className="mt-1 break-all font-mono text-xs text-fog">
-                            {target.base_url}/api/hyfit-judge/ingest/events/{target.remote_event_id}/
-                            <span className="text-chalk">{"{athletes,results}"}</span>
-                        </p>
-                        <p className="mt-0.5 font-mono text-xs text-fog">
+                        {/* The endpoints themselves are below, editable. Here,
+                            only what identifies the connection — the two URLs
+                            used to be summarised on this line as a base URL and
+                            a brace expansion, which is exactly the shape that
+                            hid a results endpoint nothing was reading. */}
+                        <p className="mt-1 font-mono text-xs text-fog">
                             {target.token_prefix}… · expires {when(target.token_expires_at)}
                         </p>
                         {editingUrl ? (
@@ -941,7 +1221,7 @@ function LocalPanel({
                                 }}
                                 className="mt-1 text-xs font-bold uppercase tracking-widest text-fog underline hover:text-chalk"
                             >
-                                Change server address
+                                Change server address — moves both endpoints
                             </button>
                         )}
                     </div>
@@ -972,6 +1252,30 @@ function LocalPanel({
                     {failing
                         ? `Last ${target.consecutive_failures} attempt(s) failed — ${target.last_error || "no reason given"}`
                         : `Last attempt ${ago(target.last_attempt_at)} · ${target.last_status ?? "nothing sent yet"}`}
+                </div>
+
+                {/* WHERE THE TWO PUSHES ACTUALLY GO. "Where is it pushing?" is
+                    asked whenever a push fails, and until now the answer was a
+                    base URL and a brace expansion that the operator had to
+                    assemble in their head — and which was, in any case, what
+                    this code had assembled rather than what prod issued. Both
+                    are stored as pasted and either can be corrected here
+                    without a Disconnect. */}
+                <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                    <EditableEndpoint
+                        title="Participants endpoint"
+                        destination="The start list, into prod's database"
+                        url={target.athletes_url}
+                        busy={!!busy}
+                        onSave={(next) => configure({ athletesUrl: next })}
+                    />
+                    <EditableEndpoint
+                        title="Results endpoint"
+                        destination="The standings, into prod's cache, on the interval below"
+                        url={target.results_url}
+                        busy={!!busy}
+                        onSave={(next) => configure({ resultsUrl: next })}
+                    />
                 </div>
             </section>
 
@@ -1009,25 +1313,19 @@ function LocalPanel({
                         provisional by design — it expires and every push replaces it.
                     </p>
 
-                    <label className="mt-3 block text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">Push automatically</span>
-                        <select
-                            value={target.interval_minutes}
+                    <div className="mt-3">
+                        <IntervalField
+                            minutes={minutes}
+                            onChange={setMinutes}
+                            onCommit={(value) => {
+                                if (value !== target.interval_minutes) void configure({ intervalMinutes: value });
+                            }}
+                            presets={state.intervals}
+                            bounds={state.intervalBounds}
                             disabled={!!busy}
-                            onChange={(e) => void configure({ intervalMinutes: Number(e.target.value) })}
-                            className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
-                        >
-                            {state.intervals.map((m) => (
-                                <option key={m} value={m}>
-                                    {intervalLabel(m)}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <p className="mt-1 text-xs text-fog">
-                        The timer runs on this server, not in this browser — closing the console does not stop it. A
-                        push that would send standings prod already has is skipped.
-                    </p>
+                            hint={`Currently ${intervalLabel(target.interval_minutes).toLowerCase()}. The timer runs on this server, not in this browser — closing the console does not stop it. A push that would send standings prod already has is skipped.`}
+                        />
+                    </div>
 
                     {/* Without this the timer re-sends the same stored snapshot
                         all afternoon: the Results screen's Import is the only

@@ -42,10 +42,22 @@ export type HjudgeDeliveryMode = 'online' | 'offline';
 export const HJUDGE_INGEST_SCOPES = ['athletes', 'results'] as const;
 export type HjudgeIngestScope = (typeof HJUDGE_INGEST_SCOPES)[number];
 
-/** The dropdown, and the CHECK constraint on `event_push_targets`. Kept in one
- *  place because a value the UI offers and the column rejects is a save that
- *  fails with a constraint name in front of the operator. 0 = manual only. */
+/** The quick picks beside the interval box. SUGGESTIONS, not the permitted set
+ *  — see the bounds below. "Every 7 minutes" is a thing a venue may reasonably
+ *  ask for, and 086's enumerated CHECK answered it with a constraint name. */
 export const HJUDGE_PUSH_INTERVALS = [0, 1, 2, 3, 5, 10, 20, 30, 60] as const;
+
+/** What `interval_minutes` accepts, matching the CHECK in migration 087. Kept
+ *  in one place because a value the UI offers and the column rejects is a save
+ *  that fails with a constraint name in front of the operator. 0 = manual only;
+ *  a day is the far end, past which "automatic" has stopped meaning anything. */
+export const HJUDGE_PUSH_INTERVAL_MIN = 0;
+export const HJUDGE_PUSH_INTERVAL_MAX = 1440;
+
+/** What a fresh binding gets when the connect form does not say. Matches the
+ *  column default in migration 086; stated here because `bind` writes the
+ *  column explicitly and would otherwise bypass it. */
+export const HJUDGE_PUSH_INTERVAL_DEFAULT = 5;
 
 const role = env('HYFIT_NODE_ROLE', 'prod').trim().toLowerCase();
 

@@ -1,9 +1,12 @@
 import {
   chunkByBytes,
   decodeSyncCredential,
+  defaultIngestEndpoint,
   encodeSyncCredential,
   encodeSyncUrl,
   normaliseBaseUrl,
+  parseIngestEndpoint,
+  rehostEndpoint,
   HJUDGE_CREDENTIAL_PREFIX,
 } from './hjudge-sync-credential.util';
 
@@ -136,6 +139,105 @@ describe('sync connection codes', () => {
     );
     expect(normaliseBaseUrl('  ')).toBe('');
     expect(normaliseBaseUrl('not a url at all')).toBe('');
+  });
+});
+
+/* The two endpoints, kept whole.
+ *
+ * This is the half `decodeSyncCredential` deliberately throws away, and the
+ * throwing-away is what made a pasted results endpoint look accepted and do
+ * nothing: the path was discarded and the sender rebuilt one it had invented.
+ * So what these assert is mostly "the URL that comes out is the URL that went
+ * in, minus the secret". */
+describe('ingest endpoints', () => {
+  const athletes = encodeSyncUrl(credential, 'athletes');
+  const results = encodeSyncUrl(credential, 'results');
+
+  it('keeps the pasted path and strips only the credential', () => {
+    const parsed = parseIngestEndpoint(athletes, 'athletes');
+    expect(parsed.url).toBe(athletes.split('?')[0]);
+    expect(parsed.url).not.toContain('k=');
+    expect(parsed.token).toBe(credential.token);
+    expect(parsed.eventId).toBe(credential.eventId);
+    expect(parsed.baseUrl).toBe(credential.baseUrl);
+  });
+
+  // The point of the change: prod publishing this route from somewhere the
+  // sender would never have guessed is not an error, and the pasted address is
+  // what gets stored.
+  it('keeps a path this codebase would never have built', () => {
+    const odd =
+      'https://ingest.example.com/hyfit/v9/events/' +
+      credential.eventId +
+      '/standings?k=' +
+      credential.token;
+    const parsed = parseIngestEndpoint(odd, 'results');
+    expect(parsed.url).toBe(odd.split('?')[0]);
+    expect(parsed.baseUrl).toBe('https://ingest.example.com');
+  });
+
+  it('keeps other query parameters, and does not leave a bare ?', () => {
+    const withExtras = `${athletes}&tenant=bengaluru`;
+    const parsed = parseIngestEndpoint(withExtras, 'athletes');
+    expect(parsed.url).toContain('tenant=bengaluru');
+    expect(parsed.url).not.toContain('k=');
+    expect(parseIngestEndpoint(athletes, 'athletes').url).not.toMatch(/\?$/);
+  });
+
+  // The silent mix-up: the same URL in both boxes sends the roster to the
+  // results route, which prod accepts as an empty standings push.
+  it('catches the two endpoints being pasted the wrong way round', () => {
+    expect(() => parseIngestEndpoint(results, 'athletes')).toThrow(/results/i);
+    expect(() => parseIngestEndpoint(athletes, 'results')).toThrow(
+      /participants/i,
+    );
+  });
+
+  it('names what is missing, per box', () => {
+    expect(() => parseIngestEndpoint('', 'results')).toThrow(/results endpoint/i);
+    expect(() => parseIngestEndpoint('', 'athletes')).toThrow(
+      /participants endpoint/i,
+    );
+    expect(() => parseIngestEndpoint(athletes.split('?')[0], 'athletes')).toThrow(
+      /\?k=/,
+    );
+    expect(() => parseIngestEndpoint('HYFITSYNC1.abc', 'athletes')).toThrow(
+      /https:\/\//,
+    );
+    expect(() =>
+      parseIngestEndpoint(`https://app.example.com/nothing?k=x`, 'athletes'),
+    ).toThrow(/names no event/i);
+  });
+
+  it('survives a token with characters that need escaping', () => {
+    const odd = { ...credential, token: 'hyfitsync_a+b/c=d e' };
+    expect(parseIngestEndpoint(encodeSyncUrl(odd, 'results'), 'results').token).toBe(
+      odd.token,
+    );
+  });
+
+  // What a binding made from the short code — or one made before the endpoints
+  // were stored at all — falls back to. It must be exactly what the sender used
+  // to build, or those bindings change behaviour on upgrade.
+  it('builds the same endpoint the URL form encodes', () => {
+    expect(
+      defaultIngestEndpoint(credential.baseUrl, credential.eventId, 'results'),
+    ).toBe(results.split('?')[0]);
+  });
+
+  // "Change server address" has to move the endpoints with it, or it is a
+  // no-op on the only field it exists to fix.
+  it('moves an endpoint onto another origin, path intact', () => {
+    const moved = rehostEndpoint(
+      'https://app.example.com/hyfit/v9/events/abc/standings',
+      'http://192.168.1.20:3001',
+    );
+    expect(moved).toBe('http://192.168.1.20:3001/hyfit/v9/events/abc/standings');
+  });
+
+  it('leaves an endpoint alone when the new address is unusable', () => {
+    const url = 'https://app.example.com/x';
+    expect(rehostEndpoint(url, 'not a url at all')).toBe(url);
   });
 });
 

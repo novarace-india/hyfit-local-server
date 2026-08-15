@@ -508,6 +508,7 @@ export class HjudgeAdminController {
       event: local.event,
       counts: local.counts,
       intervals: local.intervals,
+      intervalBounds: local.intervalBounds,
       credentials: prod.credentials,
       remoteCounts: prod.counts,
       target: local.target,
@@ -566,12 +567,22 @@ export class HjudgeAdminController {
     return this.ingest.revokeCredential(scoped.eventId!, id, scoped);
   }
 
-  /* POST /admin/sync/bind { code, baseUrl? } — LOCAL. Handshakes before it
-     stores anything, so a code for the wrong event fails on a read. */
+  /* POST /admin/sync/bind { athletesUrl, resultsUrl, intervalMinutes?, baseUrl? }
+     — LOCAL. Both endpoints prod issued, stored as pasted; `code` is still
+     accepted for the one-paste form. Handshakes before it stores anything, so a
+     credential for the wrong event fails on a read. */
   @Post('sync/bind')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
   async bindSyncTarget(
-    @Body() body: { code?: string; baseUrl?: string; eventId?: string },
+    @Body()
+    body: {
+      code?: string;
+      baseUrl?: string;
+      athletesUrl?: string;
+      resultsUrl?: string;
+      intervalMinutes?: number;
+      eventId?: string;
+    },
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
@@ -590,9 +601,10 @@ export class HjudgeAdminController {
     return this.push.unbind((await this.scopeTo(user, eventId)).eventId!);
   }
 
-  /* PUT /admin/sync/config { intervalMinutes?, enabled? } — LOCAL. The interval
-     dropdown; 0 means manual only. Takes effect on the scheduler's next tick,
-     with no restart. */
+  /* PUT /admin/sync/config { intervalMinutes?, enabled?, athletesUrl?,
+     resultsUrl?, ... } — LOCAL. The two endpoint boxes and the interval; 0
+     minutes means manual only. Takes effect on the scheduler's next tick, with
+     no restart. Only the fields present change. */
   @Put('sync/config')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
   async configureSync(
@@ -602,6 +614,8 @@ export class HjudgeAdminController {
       enabled?: boolean;
       autoImportResults?: boolean;
       baseUrl?: string;
+      athletesUrl?: string;
+      resultsUrl?: string;
       eventId?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
