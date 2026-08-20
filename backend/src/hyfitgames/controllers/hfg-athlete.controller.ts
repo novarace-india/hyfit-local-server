@@ -36,13 +36,16 @@ import {
 // Reading the token's row alone would show somebody a single event and call it
 // their record.
 //
-// Everything below `stats` — the per-registration result, protests and
-// full-stats — still addresses `category_entries`, `registrations`, `splits`
-// and `stations` through this pool's search_path, which points at the dropped
-// `hyfit` schema. Those routes answer 500 and have done since the cutover.
-// They are left as they are rather than half-ported: protests and per-station
-// splits have no home in hyfit_v2 yet, and inventing one to make a route return
-// 200 would be worse than the 500 that says the feature is not there.
+// `full-stats` was re-homed too (2026-08-16) — see the note on it for the
+// table-by-table translation and for the two facts it can no longer report.
+//
+// What is still NOT ported: `myRegistration` and `submitProtest`. Both address
+// `category_entries`, `registrations`, `splits`, `stations` and `protests`
+// through this pool's search_path, which points at the dropped `hyfit` schema,
+// so both answer 500 and have done since the cutover. They are left rather than
+// half-ported: protests have no home in hyfit_v2 at all, and inventing one to
+// make a route return 200 would be worse than the 500 that says the feature is
+// not there.
 @Public()
 @UseGuards(HfgAthleteGuard)
 @Controller('hyfitgames/me')
@@ -460,143 +463,183 @@ export class HfgAthleteController {
     return p[0];
   }
 
-  /* GET /api/hyfitgames/me/full-stats — comprehensive performance dashboard */
+  /* GET /api/hyfitgames/me/full-stats — comprehensive performance dashboard.
+   *
+   * Re-homed onto hyfit_v2 (083–085). It used to read `category_entries`,
+   * `registrations`, `splits` and `stations` — four tables the cutover dropped —
+   * and had answered 500 on every load since.
+   *
+   * The translation, once, because every query below shares it:
+   *
+   *   category_entries + registrations  →  hyfit_v2.athletes, which since 085 IS
+   *                                        the entry. A PERSON is the set of rows
+   *                                        sharing a phone and a name, so each
+   *                                        query joins the table to itself on the
+   *                                        two key functions — reading the
+   *                                        token's row alone would show somebody
+   *                                        one event and call it their record.
+   *   ce.race_status                    →  res.status. An entry with no result
+   *                                        row has no status at all, which is
+   *                                        "not scored", NOT a DNS.
+   *   e.results_status = 'final'        →  e.results_mode = 'stored'. The same
+   *                                        distinction `myStats` already draws:
+   *                                        a live pull lives in Valkey and is
+   *                                        provisional, and a career statistic
+   *                                        built on it would change under the
+   *                                        athlete as the cache expired.
+   *   e.city                            →  e.venue
+   *   res.overall_rank                  →  res.rank
+   *   splits + stations                 →  the twelve run/station columns on the
+   *                                        result row, which is where the circuit
+   *                                        lives since the field apps stopped
+   *                                        writing splits (079).
+   *
+   * TWO FACTS ARE GONE and are reported as absent rather than approximated:
+   * `gender_rank` (hyfit_v2.results does not carry one, and most feeds send no
+   * gender at all) and an event `edition` number. The page renders "—" for both.
+   */
   @Get('full-stats')
   async fullStats(@HfgAthleteId() aid: string) {
+    // Every row this person owns, with its event and its result. The rest of
+    // this method is aggregates over exactly this set.
+    const MINE = `
+         FROM hyfit_v2.athletes me
+         JOIN hyfit_v2.athletes a
+           ON hyfit_v2.mobile_key(a.mobile) = hyfit_v2.mobile_key(me.mobile)
+          AND hyfit_v2.name_key(a.name) = hyfit_v2.name_key(me.name)
+         JOIN hyfit_v2.events e ON e.id = a.event_id
+         LEFT JOIN hyfit_v2.results res
+                ON res.athlete_id = a.id AND e.results_mode = 'stored'
+        WHERE me.id = $1`;
+
     const { rows: core } = await this.db.q(
+      // `total_events` counts DISTINCT events: three categories at one event is
+      // one event raced, and counting entries would tell an athlete they had
+      // done three.
       `SELECT
-        count(DISTINCT e.id)::int AS total_events,
-        count(*) FILTER (WHERE ce.race_status='FIN')::int AS finishes,
-        count(*) FILTER (WHERE ce.race_status='DNF')::int AS dnfs,
-        count(*) FILTER (WHERE ce.race_status='DNS')::int AS dns,
-        min(res.total_ms) FILTER (WHERE e.results_status='final') AS pb_ms,
-        max(res.total_ms) FILTER (WHERE e.results_status='final') AS worst_ms,
-        avg(res.total_ms) FILTER (WHERE e.results_status='final')::int AS avg_ms,
-        count(*) FILTER (WHERE res.overall_rank=1 AND e.results_status='final')::int AS wins,
-        count(*) FILTER (WHERE res.overall_rank<=3 AND e.results_status='final')::int AS podiums,
-        count(*) FILTER (WHERE res.overall_rank<=10 AND e.results_status='final')::int AS top10,
-        min(res.overall_rank) FILTER (WHERE e.results_status='final') AS best_rank,
-        avg(res.overall_rank) FILTER (WHERE e.results_status='final')::numeric(5,1) AS avg_rank,
-        count(DISTINCT e.city)::int AS cities_visited
-      FROM category_entries ce
-      JOIN registrations r ON r.id = ce.registration_id
-      JOIN events e ON e.id = ce.event_id
-      LEFT JOIN results res ON res.entry_id = ce.id
-      WHERE r.athlete_id = $1`,
+        count(DISTINCT a.event_id)::int                         AS total_events,
+        count(*) FILTER (WHERE res.status = 'FIN')::int         AS finishes,
+        count(*) FILTER (WHERE res.status = 'DNF')::int         AS dnfs,
+        count(*) FILTER (WHERE res.status = 'DNS')::int         AS dns,
+        min(res.total_ms)                                       AS pb_ms,
+        max(res.total_ms)                                       AS worst_ms,
+        avg(res.total_ms)::int                                  AS avg_ms,
+        count(*) FILTER (WHERE res.rank = 1)::int               AS wins,
+        count(*) FILTER (WHERE res.rank <= 3)::int              AS podiums,
+        count(*) FILTER (WHERE res.rank <= 10)::int             AS top10,
+        min(res.rank)                                           AS best_rank,
+        avg(res.rank)::numeric(5,1)                             AS avg_rank,
+        count(DISTINCT e.venue) FILTER (WHERE e.venue IS NOT NULL)::int
+                                                                AS cities_visited
+        ${MINE}`,
       [aid],
     );
 
     const { rows: cityBreakdown } = await this.db.q(
-      `SELECT e.city, count(DISTINCT e.id)::int AS events,
-             min(res.total_ms) AS best_ms,
-             avg(res.total_ms)::int AS avg_ms,
-             count(*) FILTER (WHERE res.overall_rank=1)::int AS wins,
-             count(*) FILTER (WHERE res.overall_rank<=3)::int AS podiums,
-             avg(res.overall_rank)::numeric(5,1) AS avg_rank
-        FROM category_entries ce
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN' AND e.results_status='final'
-        GROUP BY e.city ORDER BY events DESC`,
+      `SELECT e.venue AS city, count(DISTINCT a.event_id)::int AS events,
+              min(res.total_ms) AS best_ms,
+              avg(res.total_ms)::int AS avg_ms,
+              count(*) FILTER (WHERE res.rank = 1)::int AS wins,
+              count(*) FILTER (WHERE res.rank <= 3)::int AS podiums,
+              avg(res.rank)::numeric(5,1) AS avg_rank
+         ${MINE} AND res.status = 'FIN' AND e.venue IS NOT NULL
+        GROUP BY e.venue ORDER BY events DESC`,
       [aid],
     );
 
     const { rows: progression } = await this.db.q(
-      `SELECT e.name, e.city, e.edition, e.event_date, e.event_date AS date,
-             res.total_ms, res.overall_rank, res.gender_rank
-        FROM category_entries ce
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN' AND e.results_status='final'
+      // `edition` is not a fact hyfit_v2 holds; the column is kept in the shape
+      // so the page's chart labels have somewhere to look, and it is honestly
+      // null rather than a guessed sequence number.
+      `SELECT e.name, e.venue AS city, NULL::int AS edition,
+              e.event_date, e.event_date AS date,
+              res.total_ms, res.rank AS overall_rank, NULL::int AS gender_rank
+         ${MINE} AND res.status = 'FIN' AND res.total_ms IS NOT NULL
         ORDER BY e.event_date`,
       [aid],
     );
 
+    /* The circuit, from the twelve typed columns rather than from `splits`.
+     *
+     * `best_rank_in_station` / `total_athletes_at_station` are NOT carried over.
+     * The old query ranked these rows against each other — one athlete's own
+     * legs — so it answered "1 of 1" for every station and told nobody
+     * anything. Ranking a leg against the whole field is a real question and a
+     * different query; leaving the keys out lets the page fall back to its
+     * neutral 50% rather than print a fabricated placing. */
+    const legs = (select: string, extra = '') => `
+      SELECT ${select} FROM (
+        SELECT unnest(ARRAY['Run 1','Station 1','Run 2','Station 2','Run 3','Station 3',
+                            'Run 4','Station 4','Run 5','Station 5','Run 6','Station 6']) AS name,
+               unnest(ARRAY[1,2,3,4,5,6,7,8,9,10,11,12]) AS seq,
+               unnest(ARRAY[res.run1_ms, res.st1_ms, res.run2_ms, res.st2_ms,
+                            res.run3_ms, res.st3_ms, res.run4_ms, res.st4_ms,
+                            res.run5_ms, res.st5_ms, res.run6_ms, res.st6_ms]) AS ms,
+               e.event_date
+          ${MINE} AND res.status = 'FIN'
+      ) legs
+       WHERE ms IS NOT NULL ${extra}`;
+
     const { rows: stationPerf } = await this.db.q(
-      `SELECT st.name, st.seq,
-             min(s.split_ms) AS best_ms,
-             max(s.split_ms) AS worst_ms,
-             avg(s.split_ms)::int AS avg_ms,
-             count(*)::int AS attempts,
-             rank() OVER (PARTITION BY st.seq ORDER BY min(s.split_ms)) AS best_rank_in_station,
-             count(*) OVER (PARTITION BY st.seq) AS total_athletes_at_station
-        FROM splits s
-        JOIN stations st ON st.id = s.station_id
-        JOIN category_entries ce ON ce.id = s.entry_id
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id AND e.results_status='final'
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN'
-        GROUP BY st.seq, st.name ORDER BY st.seq`,
+      legs(
+        `name, seq, min(ms) AS best_ms, max(ms) AS worst_ms,
+         avg(ms)::int AS avg_ms, count(*)::int AS attempts`,
+      ) + ' GROUP BY seq, name ORDER BY seq',
       [aid],
     );
 
     const { rows: stationTrend } = await this.db.q(
-      `SELECT st.seq, st.name, e.event_date, s.split_ms
-        FROM splits s
-        JOIN stations st ON st.id = s.station_id
-        JOIN category_entries ce ON ce.id = s.entry_id
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN' AND e.results_status='final'
-        ORDER BY e.event_date, st.seq`,
+      legs('seq, name, event_date, ms AS split_ms') +
+        ' ORDER BY event_date, seq',
       [aid],
     );
 
     const { rows: monthlyPerf } = await this.db.q(
       `SELECT to_char(e.event_date, 'YYYY-MM') AS month,
-             count(DISTINCT e.id)::int AS events,
-             avg(res.total_ms)::int AS avg_ms,
-             min(res.total_ms) AS best_ms
-        FROM category_entries ce
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        LEFT JOIN results res ON res.entry_id = ce.id
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN' AND e.results_status='final'
+              count(DISTINCT a.event_id)::int AS events,
+              avg(res.total_ms)::int AS avg_ms,
+              min(res.total_ms) AS best_ms
+         ${MINE} AND res.status = 'FIN' AND e.event_date IS NOT NULL
         GROUP BY to_char(e.event_date, 'YYYY-MM')
         ORDER BY to_char(e.event_date, 'YYYY-MM')`,
       [aid],
     );
 
+    /* Where this athlete's times sit in the whole published field.
+     *
+     * Every one of their finishes against every stored finish anywhere — the
+     * same cross join the old query did — so somebody who has raced three times
+     * is measured on all three rather than on their best. */
     const { rows: pctl } = await this.db.q(
       `WITH all_finishers AS (
-        SELECT res.total_ms, res.entry_id
-          FROM results res
-          JOIN category_entries ce ON ce.id = res.entry_id
-          JOIN registrations r ON r.id = ce.registration_id
-          JOIN events e ON e.id = ce.event_id
-          WHERE e.results_status='final' AND ce.race_status='FIN'
-      ),
-      my_times AS (
-        SELECT res.total_ms FROM results res
-          JOIN category_entries ce ON ce.id = res.entry_id
-          JOIN registrations r ON r.id = ce.registration_id
-          WHERE r.athlete_id = $1 AND ce.race_status='FIN'
-      )
-      SELECT
-        round(100.0 * count(*) FILTER (WHERE af.total_ms > mt.total_ms) /
-              nullif(count(*), 0), 1) AS percentile
-      FROM my_times mt, all_finishers af`,
+         SELECT res.total_ms
+           FROM hyfit_v2.results res
+           JOIN hyfit_v2.events e ON e.id = res.event_id AND e.results_mode = 'stored'
+          WHERE res.status = 'FIN' AND res.total_ms IS NOT NULL
+       ),
+       my_times AS (
+         SELECT res.total_ms
+           ${MINE} AND res.status = 'FIN' AND res.total_ms IS NOT NULL
+       )
+       SELECT round(100.0 * count(*) FILTER (WHERE af.total_ms > mt.total_ms) /
+                    nullif(count(*), 0), 1) AS percentile
+         FROM my_times mt, all_finishers af`,
       [aid],
     );
 
     const { rows: consistency } = await this.db.q(
-      `SELECT stddev_samp(res.total_ms)::int AS std_dev,
-             count(*)::int AS n
-        FROM results res
-        JOIN category_entries ce ON ce.id = res.entry_id
-        JOIN registrations r ON r.id = ce.registration_id
-        WHERE r.athlete_id = $1 AND ce.race_status='FIN' AND res.total_ms IS NOT NULL`,
+      `SELECT stddev_samp(res.total_ms)::int AS std_dev, count(*)::int AS n
+         ${MINE} AND res.status = 'FIN' AND res.total_ms IS NOT NULL`,
       [aid],
     );
 
+    // In date order, because a streak is a run of consecutive finishes and an
+    // event with no result breaks it — the same rule as before, now reading the
+    // status off the result row.
     const { rows: allDates } = await this.db.q(
-      `SELECT e.event_date, ce.race_status AS status
-        FROM category_entries ce
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        WHERE r.athlete_id = $1 ORDER BY e.event_date`,
+      `SELECT e.event_date, res.status
+         ${MINE}
+        ORDER BY e.event_date`,
       [aid],
     );
 
@@ -614,23 +657,17 @@ export class HfgAthleteController {
       else break;
     }
 
-    const { rows: genderRank } = await this.db.q(
-      `SELECT avg(res.gender_rank)::numeric(5,1) AS avg_gender_rank,
-             count(*) FILTER (WHERE res.gender_rank=1)::int AS gender_wins
-        FROM results res
-        JOIN category_entries ce ON ce.id = res.entry_id
-        JOIN registrations r ON r.id = ce.registration_id
-        JOIN events e ON e.id = ce.event_id
-        WHERE r.athlete_id = $1 AND e.results_status='final'`,
+    const { rows: athleteRows } = await this.db.q(
+      'SELECT * FROM hyfit_v2.athletes WHERE id = $1',
       [aid],
     );
-
-    const athlete = (
-      await this.db.q('SELECT * FROM athletes WHERE id=$1', [aid])
-    ).rows[0];
+    if (!athleteRows[0]) throw new NotFoundException('Profile not found');
 
     return {
-      athlete,
+      // The same projection `GET /me` returns, so the page reads one shape:
+      // `full_name` and `dob` are the API's names for `name` and
+      // `date_of_birth`.
+      athlete: publicAthleteV2(athleteRows[0]),
       core: core[0],
       cityBreakdown,
       progression,
@@ -638,9 +675,15 @@ export class HfgAthleteController {
       stationTrend,
       monthlyPerf,
       percentile: pctl[0]?.percentile || 0,
-      consistency: consistency[0],
+      // std_dev is null until there are two finishes to vary between, and the
+      // page divides by it — so it leaves here as a number.
+      consistency: {
+        std_dev: consistency[0]?.std_dev ?? 0,
+        n: consistency[0]?.n ?? 0,
+      },
       streaks: { current: ongoingStreak, longest: longestStreak },
-      genderRank: genderRank[0],
+      // Absent, not zero-with-confidence: hyfit_v2 publishes no gender ranking.
+      genderRank: { avg_gender_rank: null, gender_wins: null },
     };
   }
 }

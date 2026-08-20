@@ -10,8 +10,11 @@ import { HjudgeDbService } from '../hjudge-db.service';
 import { HjudgeCacheService } from '../hjudge-cache.service';
 import { HjudgeRaceResultService } from './hjudge-raceresult.service';
 import {
+  findRows,
   parseResults,
+  REJECTION_DETAIL_CAP,
   type ImportedResult,
+  type ResultRejection,
 } from '../hjudge-results-import.util';
 import { parseParticipantImport } from '../hjudge-participant-import.util';
 
@@ -50,13 +53,25 @@ const FETCH_TIMEOUT_MS = 15_000;
 export type ResultRow = {
   bib: string;
   name: string;
+  /** The contest. The age band, when the feed names one, is `age_group`. */
   category: string | null;
   club: string | null;
   status: string;
   rank: number | null;
+  /** The band `age_group_rank` counts within — "Next Gen Boys 12-15". Null when
+   *  the feed publishes only one contest column. A placing with no band beside
+   *  it reads as "#1" on every athlete in every band. */
+  age_group: string | null;
   age_group_rank: number | null;
+  /** The athlete's age ON RACE DAY, as the export gave it — the age
+   *  `age_group` was judged against. Not read from the athlete row, which every
+   *  later import overwrites. See migration 089. */
+  age: number | null;
   total_ms: number | null;
   team_time_ms: number | null;
+  /** The pair's placing, from the feed. Null for a solo entry — like
+   *  `team_time_ms`, its presence is what says this row raced as a team. */
+  team_rank: number | null;
   /** The circuit, in course order: the cognitive segment, then six run/station
    *  pairs. Null where the feed carried nothing — an athlete still out on
    *  course has most of this empty, which is the point of showing it. */
@@ -64,6 +79,9 @@ export type ResultRow = {
   run_ms: (number | null)[];
   station_ms: (number | null)[];
   penalties: Record<string, string>;
+  /** Every other time the feed published for this row, by its own column name
+   *  ({"HyZone": "2:46"}). Unparsed on purpose — see `collectExtraTimes`. */
+  extra_times: Record<string, string>;
 };
 
 /** One `results` row, as its columns come out of Postgres or off the wire,
@@ -77,17 +95,31 @@ function rowFromColumns(r: Record<string, any>): ResultRow {
     club: r.club ?? null,
     status: r.status,
     rank: r.rank ?? null,
+    age_group: r.age_group ?? null,
     age_group_rank: r.age_group_rank ?? null,
+    age: r.age ?? null,
     total_ms: numeric(r.total_ms),
     team_time_ms: numeric(r.team_time_ms),
+    team_rank: r.team_rank ?? null,
     cog_ms: numeric(r.cog_ms),
-    run_ms: [r.run1_ms, r.run2_ms, r.run3_ms, r.run4_ms, r.run5_ms, r.run6_ms].map(
-      numeric,
-    ),
-    station_ms: [r.st1_ms, r.st2_ms, r.st3_ms, r.st4_ms, r.st5_ms, r.st6_ms].map(
-      numeric,
-    ),
+    run_ms: [
+      r.run1_ms,
+      r.run2_ms,
+      r.run3_ms,
+      r.run4_ms,
+      r.run5_ms,
+      r.run6_ms,
+    ].map(numeric),
+    station_ms: [
+      r.st1_ms,
+      r.st2_ms,
+      r.st3_ms,
+      r.st4_ms,
+      r.st5_ms,
+      r.st6_ms,
+    ].map(numeric),
     penalties: r.penalties ?? {},
+    extra_times: r.extra_times ?? {},
   };
 }
 
@@ -99,6 +131,11 @@ export type ResultsPayload = {
   fetched_at: string;
   source_count: number;
   rejected: number;
+  /* Which rows were dropped and why — see ResultRejection. Carried on the
+   * payload rather than only logged, because the operator who can fix the
+   * export is standing at the console, not reading the server's log. Optional:
+   * a payload cached by an older build has none. */
+  rejections?: ResultRejection[];
   rows: ResultRow[];
 };
 
@@ -151,6 +188,34 @@ export class HjudgeResultsService {
    *  worst failure this feature has available to it. So a shared name — and
    *  only a shared name — gets the event id appended. The common case keeps the
    *  readable key. */
+  /* The dropped rows, in the log, in the file's own order.
+   *
+   * The console shows the same list — this is for afterwards: the operator who
+   * says "seven were rejected" a week later, or the run nobody was watching.
+   * One line per row rather than a blob, because that is what grep is for, and
+   * capped by the same cap the response carries so a broken export cannot fill
+   * a disk with its own contents. */
+  private logRejections(
+    origin: string,
+    rejections: ResultRejection[],
+    total: number,
+  ) {
+    const shown = rejections.slice(0, REJECTION_DETAIL_CAP);
+    this.logger.warn(
+      `${origin}: ${total} row(s) rejected` +
+        (total > shown.length ? `, first ${shown.length} listed` : '') +
+        ' — ' +
+        shown
+          .map(
+            (r) =>
+              `${r.row ? `row ${r.row}` : 'row ?'} bib "${r.bib}"` +
+              `${r.name ? ` (${r.name})` : ''}` +
+              `${r.category ? ` in ${r.category}` : ''}: ${REJECTION_REASONS[r.reason]}`,
+          )
+          .join('; '),
+    );
+  }
+
   private liveKey(event: EventRow) {
     const base = `hyfitgames:results:${slug(event.name)}`;
     return event.name_shared ? `${base}:${event.id}` : base;
@@ -190,6 +255,10 @@ export class HjudgeResultsService {
             fetched_at: cached.fetched_at,
             rows: cached.rows.length,
             rejected: cached.rejected,
+            // Still answerable an hour after the pull, which is when somebody
+            // asks. A payload cached by a build before this shipped has none,
+            // and reads as an empty list rather than a wrong one.
+            rejections: cached.rejections ?? [],
           }
         : null,
       stored: {
@@ -234,21 +303,63 @@ export class HjudgeResultsService {
    * waiting to look at the standings before deciding whether to show them.
    */
   async pull(eventId: string, override?: string): Promise<ResultsPayload> {
-    const event = await this.event(eventId);
     const config = await this.raceResult.loadConfig(eventId);
     const url = resultsUrl(config.resultsUrl, override);
-
     const raw = await this.fetchJson(url);
-    const { results, rejectedCount, sourceColumns } = parseResults(
+    return this.cacheStandings(
+      eventId,
       raw,
       config.resultsMapping,
+      url,
+      'RaceResult',
+    );
+  }
+
+  /**
+   * The same pull, from a file an operator picked instead of an endpoint.
+   *
+   * It exists for the event whose standings cannot be fetched: an offline
+   * venue, a RaceResult server that is down, an export that arrived by email.
+   * Everything after the file is read is the fetched path exactly — the same
+   * parser, the same mapping, the same key, the same read-back check — because
+   * a second way of reading a feed is a second way for it to be read WRONGLY,
+   * and the file is usually the same export the endpoint would have served.
+   */
+  async pullUpload(
+    eventId: string,
+    raw: unknown,
+    label: string,
+  ): Promise<ResultsPayload> {
+    const config = await this.raceResult.loadConfig(eventId);
+    return this.cacheStandings(
+      eventId,
+      uploadedList(raw, config.resultsMapping, quoted(label)),
+      withoutListPath(config.resultsMapping),
+      // No URL: nothing was fetched from anywhere, and the field is a
+      // credential the console would otherwise be handing back a fake of.
+      null,
+      quoted(label),
+    );
+  }
+
+  private async cacheStandings(
+    eventId: string,
+    raw: unknown,
+    mapping: Record<string, unknown>,
+    url: string | null,
+    origin: string,
+  ): Promise<ResultsPayload> {
+    const event = await this.event(eventId);
+    const { results, rejectedCount, rejections, sourceColumns } = parseResults(
+      raw,
+      mapping,
     );
     if (!results.length)
       throw new BadRequestException(
-        `RaceResult returned no usable rows (${rejectedCount} rejected). Columns seen: ${
-          sourceColumns.join(', ') || 'none'
-        } — check which one holds the bib.`,
+        noUsableRows(origin, rejectedCount, sourceColumns),
       );
+
+    if (rejections.length) this.logRejections(origin, rejections, rejectedCount);
 
     const payload: ResultsPayload = {
       event_id: eventId,
@@ -258,6 +369,7 @@ export class HjudgeResultsService {
       fetched_at: new Date().toISOString(),
       source_count: results.length,
       rejected: rejectedCount,
+      rejections,
       rows: results.map(toRow),
     };
 
@@ -278,7 +390,7 @@ export class HjudgeResultsService {
 
     await this.cache.invalidateEvent(eventId);
     this.logger.log(
-      `Results pull for ${event.name}: ${results.length} rows, ${rejectedCount} rejected → ${this.liveKey(event)}`,
+      `Results pull for ${event.name} from ${origin}: ${results.length} rows, ${rejectedCount} rejected → ${this.liveKey(event)}`,
     );
     return payload;
   }
@@ -309,15 +421,52 @@ export class HjudgeResultsService {
     const config = await this.raceResult.loadConfig(eventId);
     const url = resultsUrl(config.resultsUrl, override);
     const raw = await this.fetchJson(url);
-    const { results, rejectedCount, sourceColumns } = parseResults(
+    return this.writeStandings(
+      eventId,
       raw,
       config.resultsMapping,
+      url,
+      'RaceResult',
+    );
+  }
+
+  /**
+   * The same import, from a file. See `pullUpload` for why this exists; the
+   * only difference here is what `results.source_url` records — `upload:<file>`
+   * rather than an endpoint, so an operator reading the table months later can
+   * tell standings that were fetched from standings that were carried in.
+   */
+  async storeUpload(eventId: string, raw: unknown, label: string) {
+    const config = await this.raceResult.loadConfig(eventId);
+    return this.writeStandings(
+      eventId,
+      uploadedList(raw, config.resultsMapping, quoted(label)),
+      withoutListPath(config.resultsMapping),
+      `upload:${label}`,
+      quoted(label),
+    );
+  }
+
+  private async writeStandings(
+    eventId: string,
+    raw: unknown,
+    mapping: Record<string, unknown>,
+    sourceUrl: string,
+    origin: string,
+  ): Promise<{
+    imported: number;
+    athletesCreated: number;
+    rejected: number;
+    rejections: ResultRejection[];
+    at: string;
+  }> {
+    const { results, rejectedCount, rejections, sourceColumns } = parseResults(
+      raw,
+      mapping,
     );
     if (!results.length)
       throw new BadRequestException(
-        `RaceResult returned no usable rows (${rejectedCount} rejected). Columns seen: ${
-          sourceColumns.join(', ') || 'none'
-        } — check which one holds the bib.`,
+        noUsableRows(origin, rejectedCount, sourceColumns),
       );
 
     const outcome = await this.db.tx(async (client) => {
@@ -345,6 +494,9 @@ export class HjudgeResultsService {
           gender: r.gender,
           age: r.age,
           category: r.category,
+          // The band the standings named. On the athlete row it is the band the
+          // entry is in; the placing's own band stays on the result (091).
+          ageGroup: r.ageGroup,
           club: r.club,
           source: 'results',
           raw: r.raw,
@@ -354,23 +506,84 @@ export class HjudgeResultsService {
         athleteIdByRow.set(entryKey(r.bib, r.category), resolved.athleteId);
       }
 
+      /* TWO KEYS, AND THEY DO NOT AGREE.
+       *
+       * The parser keeps one row per BIB IN A CONTEST — a bib is not unique in
+       * a pull, since one athlete can race two contests under one number. The
+       * athlete table keys an entry on WHO IN WHICH CONTEST: since 085 that is
+       * (event, phone, name, contest). Those two disagree whenever one feed
+       * carries the same person in the same contest under two bibs — a
+       * reassigned number the export lists twice, an entry duplicated by hand,
+       * or (the common one) two rows with no phone at all and the same name,
+       * which `mobile_key('')` collapses into one person.
+       *
+       * When they disagree, both rows resolve to ONE athlete row, and
+       * `hyfit_v2_results_athlete` — one result per athlete — rejects the
+       * second insert. That aborted the transaction, so a single duplicated
+       * entry anywhere in a file threw away the entire import: 73 seconds of
+       * work and a 500, with nothing said about which row caused it.
+       *
+       * The rule is the parser's own, applied one key later: the FIRST row
+       * wins and the rest are counted as rejected. It cannot be anything else —
+       * a second result for one entry is the feed contradicting itself, and
+       * letting the last write win would make the stored standings depend on
+       * the order the rows happened to appear in. Which bibs collided is logged
+       * rather than swallowed, because the answer is nearly always a duplicate
+       * in the export that somebody needs to go and fix.
+       */
+      const insertable: typeof results = [];
+      const claimedBy = new Map<string, string>();
+      const collisions: string[] = [];
+      // Reported beside the parser's own rejections: from where the operator is
+      // standing these are the same event — a row in the file that is not on
+      // the board — and which of the two keys dropped it is our detail, not
+      // theirs. The reason still says which, because the fixes differ.
+      const collisionDetails: ResultRejection[] = [];
+      for (const r of results) {
+        const athleteId = athleteIdByRow.get(entryKey(r.bib, r.category))!;
+        const holder = claimedBy.get(athleteId);
+        if (holder) {
+          collisions.push(`${r.bib} (${r.category || 'no contest'}) → ${holder}`);
+          if (collisionDetails.length < REJECTION_DETAIL_CAP)
+            collisionDetails.push({
+              // The file position is not knowable here — this pass runs over
+              // parsed results, not raw rows — so it is 0, meaning "no line
+              // number", and the bib and contest are what identify it.
+              row: 0,
+              bib: r.bib,
+              name: r.name,
+              category: r.category,
+              reason: 'same-athlete-twice',
+            });
+          continue;
+        }
+        claimedBy.set(athleteId, `${r.bib} (${r.category || 'no contest'})`);
+        insertable.push(r);
+      }
+      if (collisions.length)
+        this.logger.warn(
+          `Results for ${eventId}: ${collisions.length} row(s) skipped — the same entry twice: ${collisions.join(', ')}`,
+        );
+
       // Replace, inside the same transaction as the insert, so a failed import
       // cannot leave an event with no results at all.
       await client.query('DELETE FROM results WHERE event_id = $1', [eventId]);
 
-      for (const r of results) {
+      for (const r of insertable) {
         await client.query(
           `INSERT INTO results (
              event_id, athlete_id, bib, name, category, club, status,
              rank, age_group_rank, total_ms, team_time_ms,
              cog_ms, run1_ms, st1_ms, run2_ms, st2_ms, run3_ms, st3_ms,
              run4_ms, st4_ms, run5_ms, st5_ms, run6_ms, st6_ms,
-             penalties, raw, source_url)
+             penalties, raw, source_url, age_group, team_rank, extra_times,
+             age)
            VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,
                    $8,$9,$10,$11,
                    $12,$13,$14,$15,$16,$17,$18,
                    $19,$20,$21,$22,$23,$24,
-                   $25::jsonb,$26::jsonb,$27)`,
+                   $25::jsonb,$26::jsonb,$27,NULLIF($28,''),$29,$30::jsonb,
+                   $31)`,
           [
             eventId,
             athleteIdByRow.get(entryKey(r.bib, r.category)),
@@ -398,7 +611,11 @@ export class HjudgeResultsService {
             r.stationMs[5],
             JSON.stringify(r.penalties),
             JSON.stringify(r.raw),
-            url,
+            sourceUrl,
+            r.ageGroup,
+            r.teamRank,
+            JSON.stringify(r.extraTimes),
+            r.age,
           ],
         );
       }
@@ -410,9 +627,13 @@ export class HjudgeResultsService {
       );
 
       return {
-        imported: results.length,
+        // What is IN the table, not what was parsed. An operator who uploads
+        // 512 rows and is told 512 were imported has no way to discover the
+        // four the second key collapsed.
+        imported: insertable.length,
         athletesCreated,
-        rejected: rejectedCount,
+        rejected: rejectedCount + collisions.length,
+        rejections: [...rejections, ...collisionDetails],
         at: stamped[0].at,
       };
     });
@@ -421,6 +642,8 @@ export class HjudgeResultsService {
     this.logger.log(
       `Results stored for ${eventId}: ${outcome.imported} rows, ${outcome.athletesCreated} athletes created`,
     );
+    if (outcome.rejections.length)
+      this.logRejections(origin, outcome.rejections, outcome.rejected);
     return outcome;
   }
 
@@ -445,13 +668,53 @@ export class HjudgeResultsService {
     this.raceResult.requireFeed(config);
 
     const raw = await this.fetchJson(config.participantApiUrl);
-    const { participants, rejectedCount } = parseParticipantImport(
+    return this.writeRoster(
+      eventId,
       raw,
       config.participantMapping,
+      'The participant endpoint',
+      'raceresult',
+    );
+  }
+
+  /**
+   * The same start-list import, from a file an operator picked.
+   *
+   * It REPLACES the roster exactly as the endpoint version does — a file is the
+   * start list, not an addition to it — so uploading a partial export drops
+   * everybody it leaves out. That is the same rule the feed already obeys, and
+   * the alternative (a file that merges, an endpoint that replaces) is two
+   * meanings for one button.
+   *
+   * The rows are marked `source = 'upload'`, so a roster carried in by hand is
+   * distinguishable from one the provider served — which matters when a later
+   * feed import overwrites it.
+   */
+  async importAthletesUpload(eventId: string, raw: unknown, label: string) {
+    const config = await this.raceResult.loadConfig(eventId);
+    return this.writeRoster(
+      eventId,
+      uploadedList(raw, config.participantMapping, quoted(label)),
+      withoutListPath(config.participantMapping),
+      quoted(label),
+      'upload',
+    );
+  }
+
+  private async writeRoster(
+    eventId: string,
+    raw: unknown,
+    mapping: Record<string, unknown>,
+    origin: string,
+    source: 'raceresult' | 'upload',
+  ) {
+    const { participants, rejectedCount } = parseParticipantImport(
+      raw,
+      mapping,
     );
     if (!participants.length)
       throw new BadRequestException(
-        `The participant endpoint returned no usable rows (${rejectedCount} rejected) — check the participant field mapping in Operations, especially the bib column.`,
+        `${origin} returned no usable rows (${rejectedCount} rejected) — check the participant field mapping in Operations, especially the bib column.`,
       );
 
     const outcome = await this.db.tx(async (client) => {
@@ -470,13 +733,14 @@ export class HjudgeResultsService {
           gender: p.gender,
           dateOfBirth: p.dateOfBirth,
           category: p.category,
+          ageGroup: p.ageGroup,
           club: p.club,
           contestId: p.contestId,
           wave: p.wave,
           timeslot: p.timeslot,
           contestDate: p.contestDate,
           sourceId: p.id,
-          source: 'raceresult',
+          source,
           raw: p as unknown as Record<string, unknown>,
           authoritative: true,
         });
@@ -511,7 +775,7 @@ export class HjudgeResultsService {
     });
 
     this.logger.log(
-      `Athlete import for ${eventId}: ${outcome.imported} rows, ${outcome.created} new, ${outcome.removed} removed`,
+      `Athlete import for ${eventId} from ${origin}: ${outcome.imported} rows, ${outcome.created} new, ${outcome.removed} removed`,
     );
     return {
       ...outcome,
@@ -548,6 +812,8 @@ export class HjudgeResultsService {
       dateOfBirth?: string;
       age?: number | null;
       category?: string;
+      /** The age band the entry is in, when the feed names one (091). */
+      ageGroup?: string;
       club?: string;
       contestId?: string;
       wave?: string;
@@ -565,12 +831,17 @@ export class HjudgeResultsService {
       // The conflict target is written exactly as `hyfit_v2_athletes_entry`
       // declares it (085) — an expression index can only be inferred by
       // repeating its expressions.
+      // `age_group` is last rather than beside `category` so the existing
+      // parameter numbers — and the $17 the CASE arms below read — stay where
+      // they were. See migration 091.
       `INSERT INTO athletes (
          event_id, name, mobile, gender, date_of_birth, bib, category, club,
-         contest_id, wave, timeslot, contest_date, age, source, source_id, raw)
+         contest_id, wave, timeslot, contest_date, age, source, source_id, raw,
+         age_group)
        VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,'')::date,
                NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),
-               NULLIF($11,''),NULLIF($12,'')::date,$13,$14,NULLIF($15,''),$16::jsonb)
+               NULLIF($11,''),NULLIF($12,'')::date,$13,$14,NULLIF($15,''),$16::jsonb,
+               NULLIF($18,''))
        ON CONFLICT (event_id,
                     (hyfit_v2.mobile_key(mobile)),
                     (hyfit_v2.name_key(name)),
@@ -590,9 +861,16 @@ export class HjudgeResultsService {
          timeslot      = COALESCE(excluded.timeslot, athletes.timeslot),
          contest_date  = COALESCE(excluded.contest_date, athletes.contest_date),
          age           = COALESCE(excluded.age, athletes.age),
+         -- Newest non-null wins, the same rule as age: both feeds can carry the
+         -- band, and an export that stops carrying it has moved nobody out of it.
+         age_group     = COALESCE(excluded.age_group, athletes.age_group),
          -- A row first seen in the standings and now found on the start list is
-         -- a start-list row: the better provenance wins.
-         source        = CASE WHEN $17 THEN 'raceresult' ELSE athletes.source END,
+         -- a start-list row: the better provenance wins. excluded.source, not
+         -- a literal, so an uploaded start list records that it was uploaded —
+         -- the insert branch already says so, and the two disagreeing would make
+         -- the column mean "how it first arrived" on some rows and "how it last
+         -- arrived" on others.
+         source        = CASE WHEN $17 THEN excluded.source ELSE athletes.source END,
          source_id     = COALESCE(excluded.source_id, athletes.source_id),
          raw           = CASE WHEN $17 THEN excluded.raw ELSE athletes.raw END,
          updated_at    = now()
@@ -617,6 +895,7 @@ export class HjudgeResultsService {
         row.sourceId ?? '',
         JSON.stringify(row.raw),
         row.authoritative,
+        row.ageGroup ?? '',
       ],
     );
     return { athleteId: rows[0].id, created: rows[0].inserted };
@@ -633,7 +912,7 @@ export class HjudgeResultsService {
     const term = search.trim();
     const { rows } = await this.db.q(
       `SELECT a.id, a.bib, a.name, a.gender, a.date_of_birth, a.age, a.mobile,
-              a.club, a.category, a.contest_id, a.wave, a.timeslot,
+              a.club, a.category, a.age_group, a.contest_id, a.wave, a.timeslot,
               a.contest_date, a.source, a.updated_at,
               CASE WHEN hyfit_v2.mobile_key(a.mobile) = '' THEN 1 ELSE (
                 SELECT count(DISTINCT x.event_id)::int FROM athletes x
@@ -645,7 +924,10 @@ export class HjudgeResultsService {
           AND ($2::text = '' OR a.bib ILIKE '%' || $2 || '%'
                              OR a.name ILIKE '%' || $2 || '%'
                              OR COALESCE(a.mobile,'') ILIKE '%' || $2 || '%'
-                             OR COALESCE(a.club,'') ILIKE '%' || $2 || '%')
+                             OR COALESCE(a.club,'') ILIKE '%' || $2 || '%'
+                             -- Searchable for the same reason it is shown: an
+                             -- organiser checking a band checks who is in it.
+                             OR COALESCE(a.age_group,'') ILIKE '%' || $2 || '%')
         ORDER BY a.category, (a.bib ~ '^\\d+$') DESC,
                  CASE WHEN a.bib ~ '^\\d+$' THEN a.bib::bigint END, a.bib, a.name`,
       [eventId, term],
@@ -739,8 +1021,8 @@ export class HjudgeResultsService {
 
   private async readStored(event: EventRow): Promise<ResultsPayload | null> {
     const { rows } = await this.db.q(
-      `SELECT bib, name, category, club, status, rank, age_group_rank,
-              total_ms, team_time_ms, cog_ms,
+      `SELECT bib, name, category, club, status, rank, age_group, age_group_rank,
+              age, total_ms, team_time_ms, team_rank, cog_ms, extra_times,
               run1_ms, st1_ms, run2_ms, st2_ms, run3_ms, st3_ms,
               run4_ms, st4_ms, run5_ms, st5_ms, run6_ms, st6_ms,
               penalties
@@ -805,9 +1087,7 @@ export class HjudgeResultsService {
     // into a cache that is not there would report success, the venue would see
     // a green tick, and the public page would serve nothing at all. Live mode
     // is entirely Valkey; if the write did not land, the sender has to be told.
-    const stored = await this.cache
-      .get<ResultsPayload>(key)
-      .catch(() => null);
+    const stored = await this.cache.get<ResultsPayload>(key).catch(() => null);
     if (!stored?.rows?.length) {
       throw new ServiceUnavailableException(
         `Standings were accepted but did not survive the cache at ${key} — Valkey is unreachable on this server, so live results cannot be published.`,
@@ -859,14 +1139,80 @@ function toRow(r: ImportedResult): ResultRow {
     club: r.club || null,
     status: r.status,
     rank: r.rank,
+    age_group: r.ageGroup || null,
     age_group_rank: r.ageGroupRank,
+    age: r.age,
     total_ms: r.totalMs,
     team_time_ms: r.teamTimeMs,
+    team_rank: r.teamRank,
     cog_ms: r.cogMs,
     run_ms: r.runMs,
     station_ms: r.stationMs,
     penalties: r.penalties,
+    extra_times: r.extraTimes,
   };
+}
+
+/** Why a feed produced nothing usable, said the same way whether it arrived off
+ *  a URL or out of a file. The columns are named because the answer is almost
+ *  always that the bib is under a heading the mapping does not know. */
+/** What each rejection reason says in a sentence, for logs and for the console. */
+export const REJECTION_REASONS: Record<ResultRejection['reason'], string> = {
+  'no-bib': 'no usable bib number in that row',
+  'duplicate-entry': 'the same bib in the same contest appeared earlier in the file',
+  'same-athlete-twice':
+    'the same athlete already has a result in this contest under another bib',
+};
+
+function noUsableRows(
+  origin: string,
+  rejected: number,
+  sourceColumns: string[],
+) {
+  return `${origin} returned no usable rows (${rejected} rejected). Columns seen: ${
+    sourceColumns.join(', ') || 'none'
+  } — check which one holds the bib.`;
+}
+
+/**
+ * The rows inside a file an operator picked.
+ *
+ * `findRows` walks the shapes this provider emits — a bare array, `{data:[…]}`,
+ * `{Results:{List:[…]}}` — so a file saved from any of them lands the same way.
+ * The results parser does that walk itself; the participant parser does NOT (it
+ * demands an array at the configured path and throws otherwise), so an upload
+ * is reduced to its list HERE, once, for both.
+ *
+ * Which is why every caller pairs this with `withoutListPath`: the list has
+ * already been found, and leaving a path in the mapping would send the parser
+ * looking for it a second time, inside the array it was just handed.
+ */
+function uploadedList(
+  raw: unknown,
+  mapping: Record<string, unknown>,
+  label: string,
+): Record<string, unknown>[] {
+  const listPath = String(
+    mapping.listPath ?? mapping.participantListPath ?? mapping.list_path ?? '',
+  ).trim();
+  const rows = findRows(raw, listPath);
+  if (!rows.length)
+    throw new BadRequestException(
+      `${label} holds no rows — expected a JSON array of entries, or an object with one inside it${
+        listPath ? ` at "${listPath}"` : ''
+      }.`,
+    );
+  return rows;
+}
+
+/** A file's name as it appears in a message to the operator. One helper so the
+ *  parser's complaint and the importer's read the same way. */
+function quoted(label: string) {
+  return `“${label}”`;
+}
+
+function withoutListPath(mapping: Record<string, unknown>) {
+  return { ...mapping, listPath: '', participantListPath: '', list_path: '' };
 }
 
 /** `bigint` comes back from pg as a string, and a millisecond count rendered as

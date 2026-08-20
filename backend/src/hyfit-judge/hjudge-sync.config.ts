@@ -37,27 +37,60 @@ export type HjudgeNodeRole = 'prod' | 'local';
 /** The two things an event's public read can be served by. See migration 086. */
 export type HjudgeDeliveryMode = 'online' | 'offline';
 
-/** What a credential may write. Both halves check this — the guard on the way
- *  in, the console on the way out — so the list lives here. */
-export const HJUDGE_INGEST_SCOPES = ['athletes', 'results'] as const;
+/**
+ * What a credential opens. Both halves check this — the guard on the way in,
+ * the console on the way out — so the list lives here.
+ *
+ * ONE READ AND ONE WRITE, not two writes. `config` is prod → local: the event
+ * and its whole configuration, which is what lets a venue laptop be set up by
+ * pasting one URL instead of by retyping everything an admin already entered.
+ * `results` is local → prod: the standings.
+ *
+ * There is no `athletes` scope any more. The roster endpoint is gone — a
+ * results push carries its own athletes (see HjudgeIngestService.ingestResults)
+ * — and a scope naming an endpoint that does not exist is a scope somebody
+ * grants and then wonders why nothing happens. See migration 093.
+ */
+export const HJUDGE_INGEST_SCOPES = ['config', 'results'] as const;
 export type HjudgeIngestScope = (typeof HJUDGE_INGEST_SCOPES)[number];
 
-/** The quick picks beside the interval box. SUGGESTIONS, not the permitted set
+/** The quick picks beside each interval box. SUGGESTIONS, not the permitted set
  *  — see the bounds below. "Every 7 minutes" is a thing a venue may reasonably
  *  ask for, and 086's enumerated CHECK answered it with a constraint name. */
 export const HJUDGE_PUSH_INTERVALS = [0, 1, 2, 3, 5, 10, 20, 30, 60] as const;
 
-/** What `interval_minutes` accepts, matching the CHECK in migration 087. Kept
- *  in one place because a value the UI offers and the column rejects is a save
- *  that fails with a constraint name in front of the operator. 0 = manual only;
- *  a day is the far end, past which "automatic" has stopped meaning anything. */
-export const HJUDGE_PUSH_INTERVAL_MIN = 0;
-export const HJUDGE_PUSH_INTERVAL_MAX = 1440;
+/** The quick picks for the other direction. Configuration changes when an admin
+ *  edits it, which is rare and never urgent, so these are the slower half. */
+export const HJUDGE_PULL_INTERVALS = [0, 5, 15, 30, 60, 120] as const;
 
-/** What a fresh binding gets when the connect form does not say. Matches the
- *  column default in migration 086; stated here because `bind` writes the
- *  column explicitly and would otherwise bypass it. */
+/** What both interval columns accept, matching the CHECKs in migration 093.
+ *  Kept in one place because a value the UI offers and the column rejects is a
+ *  save that fails with a constraint name in front of the operator. 0 = manual
+ *  only; a day is the far end, past which "automatic" has stopped meaning
+ *  anything. */
+export const HJUDGE_SYNC_INTERVAL_MIN = 0;
+export const HJUDGE_SYNC_INTERVAL_MAX = 1440;
+
+/** What a fresh pairing gets when the paste does not say. Matches the column
+ *  defaults in 086 and 093; stated here because `pair` writes both columns
+ *  explicitly and would otherwise bypass them. */
 export const HJUDGE_PUSH_INTERVAL_DEFAULT = 5;
+export const HJUDGE_PULL_INTERVAL_DEFAULT = 15;
+
+/** Origin only. Duplicated from `normaliseBaseUrl` in the credential util
+ *  rather than imported, because that module imports nothing and this one is
+ *  read at module load by both — a cycle between them would be resolved
+ *  differently by ts-node and by the compiled build. */
+const normaliseOrigin = (input: string): string => {
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return new URL(withScheme).origin;
+  } catch {
+    return '';
+  }
+};
 
 const role = env('HYFIT_NODE_ROLE', 'prod').trim().toLowerCase();
 
@@ -90,6 +123,23 @@ export const hjudgeSyncConfig = {
    *  cleanly, and a push that hangs past its own interval stacks up behind the
    *  next one. */
   pushTimeoutMs: intEnv('HYFIT_PUSH_TIMEOUT_MS', 20_000),
+
+  /**
+   * The address a venue laptop can actually reach this deployment on.
+   *
+   * Only the PROD role uses it, and only to build the two URLs the console
+   * hands an operator to paste. It cannot be derived from the request: the
+   * person minting a credential may be on an internal hostname, a VPN name or
+   * localhost, while the URL they copy has to resolve from a laptop on a
+   * venue's own network on the far side of the internet. That is a deployment
+   * fact, so it lives beside the database credentials.
+   *
+   * Unset is handled rather than guessed — `mintCredential` returns
+   * `baseUrlMissing` and the console says so, which is visibly incomplete and
+   * therefore fixable. A URL built from a hostname that happens to be in the
+   * request would look correct and resolve to nothing.
+   */
+  publicBaseUrl: normaliseOrigin(env('HYFIT_PUBLIC_BASE_URL', '')),
 
   /** How long a minted credential lasts by default, in hours. An event day plus
    *  the day either side of it — long enough that nobody re-mints one at 6 AM,

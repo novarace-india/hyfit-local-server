@@ -1,231 +1,134 @@
 /**
- * The connection code: everything a local server needs to reach one prod event,
- * as one string somebody can copy.
+ * The pairing endpoints: everything a local server needs to reach one prod
+ * event, as URLs somebody can copy.
  *
- * WHY ONE STRING. The alternative is four fields — base URL, event id, token,
- * expiry — typed into four boxes at a venue, usually from a phone screen, often
- * at six in the morning. Three of the four are opaque, one of them is 71
- * characters of hex, and a single mistyped character in any of them produces
- * the same unhelpful "credential is not valid". One blob is one paste.
+ * TWO URLS, POINTING IN OPPOSITE DIRECTIONS.
  *
- * IT IS NOT ENCRYPTION AND MUST NOT BE MISTAKEN FOR IT. Base64url of JSON is a
- * transport wrapper: it survives being pasted into a chat window, a spreadsheet
- * cell or a terminal without a newline or a quote mangling it. Anyone holding
- * the code holds the token. It is a secret, it is scoped to one event, and it
- * expires — those three, not the encoding, are what make it safe to carry.
+ *     …/ingest/events/<eventId>/config?k=<token>    GET   prod → local
+ *     …/ingest/events/<eventId>/results?k=<token>   POST  local → prod
  *
- * The prefix is deliberate. A loose blob in a chat log is recognisable as a
- * HYFIT sync credential, which means somebody can revoke it without first
- * working out what it is.
+ * The first is how the venue laptop learns what the event IS — its name, dates,
+ * RaceResult wiring, declaration text, check-in window, certificate layouts.
+ * The second is how the standings come back. They share one credential: the
+ * same token opens both, and `scopes` on the token is what narrows that if an
+ * event ever wants a read-only laptop.
+ *
+ * ONE PASTE, NOT TWO. An operator pastes EITHER url and the other is derived —
+ * they differ in one path segment and nothing else, so asking for both is
+ * asking somebody to copy the same string twice at six in the morning and get
+ * one of them wrong. Both are stored, and both are editable afterwards, because
+ * an endpoint that moves mid-event should be a field somebody corrects rather
+ * than a Disconnect and a fresh credential.
+ *
+ * WHY URLS AND NOT AN OPAQUE CODE. Until 093 this was a base64url blob prefixed
+ * `HYFITSYNC1.` — compact, unmistakably a secret, and completely unreadable. An
+ * operator could not see which host they were about to push to or which event
+ * it named without pasting it somewhere and hoping. A URL is self-describing:
+ * the host and the event are on the face of it, it is the shape people already
+ * expect from "prod gives you an endpoint", and every one of them is a real
+ * route that can be opened in a browser to see what it says.
+ *
+ * THE TOKEN IS IN THE QUERY STRING HERE, AND ONLY HERE. These strings are
+ * copied between two consoles; they are never fetched with the `k` on them.
+ * When the local server actually calls prod, the token travels as
+ * `Authorization: Bearer` and the URL it requests carries no `k` at all — so
+ * the secret stays out of prod's access logs, out of whatever proxy sits in
+ * front of it, and out of `Referer`. Treat either string as a password, because
+ * that is what it is.
  */
 
-export const HJUDGE_CREDENTIAL_PREFIX = 'HYFITSYNC1.';
+/** The path both endpoints share, below the origin. One constant, because a
+ *  sender that builds a path the receiver does not serve fails with a 404 that
+ *  reads like a network problem. */
+export const HJUDGE_INGEST_PATH = '/api/hyfit-judge/ingest/events';
 
-export interface HjudgeSyncCredential {
+/** The two halves of a pairing, by the segment that distinguishes them. */
+export type HjudgeSyncRoute = 'config' | 'results';
+
+export interface HjudgeSyncPairing {
   /** Prod's origin, no trailing slash: "https://app.example.com". */
   baseUrl: string;
-  /** The event id ON PROD. The local event has its own, and they differ. */
+  /** The event id. The SAME value in both databases since 093 — the local
+   *  event is created by the first pull carrying this id, so there is no second
+   *  id to map it to. */
   eventId: string;
-  /** For the confirmation screen, so an operator sees a race name rather than
-   *  a uuid before binding. Prod re-states it in the handshake, and the
-   *  handshake is what is trusted — this is only ever a label. */
+  /** For the confirmation screen, so an operator sees a race name rather than a
+   *  uuid before pairing. Prod re-states it in the handshake, and the handshake
+   *  is what is trusted — this is only ever a label. */
   eventName: string;
   token: string;
   expiresAt: string;
+  /** GET, prod → local. */
+  pullUrl: string;
+  /** POST, local → prod. */
+  pushUrl: string;
 }
 
-/**
- * The same credential written as a URL — the "temporary endpoint" form.
- *
- *     …/ingest/events/<eventId>/athletes?k=<token>   the start list
- *     …/ingest/events/<eventId>/results?k=<token>    the standings
- *
- * Pass a `route` for one of those two; omit it for the bare event endpoint,
- * which the local server turns into both by appending the route itself.
- *
- * THE TWO URLS SHARE ONE CREDENTIAL. They are two destinations, not two keys —
- * the same token opens both, and `scopes` on the token is what could narrow
- * that if an event ever wanted a results-only sender. So binding a venue server
- * with either URL binds it for both; the pair exists because an operator
- * setting this up thinks in terms of "where does the roster go and where do the
- * results go", and answering that with one URL and a footnote does not land.
- *
- * WHY BOTH FORMS EXIST. They carry identical information and the difference is
- * entirely who is reading. The code above is compact and unmistakably a secret;
- * this is self-describing — an operator can see the host they are pushing to
- * and the event it is scoped to without decoding anything, which is the shape
- * people already expect from "prod gives you an endpoint".
- *
- * THE TOKEN IS IN THE QUERY STRING HERE, AND ONLY HERE. This string is copied
- * between two consoles; it is never fetched. When the local server actually
- * pushes, the token travels as `Authorization: Bearer` and the URL it requests
- * carries no `k` at all — so the secret stays out of prod's access logs, out of
- * whatever proxy sits in front of it, and out of `Referer`. Treat the string
- * itself as a password, because that is what it is.
- */
+/** What one pasted endpoint resolved to, before the handshake confirms it. */
+export interface HjudgeParsedEndpoint {
+  baseUrl: string;
+  eventId: string;
+  token: string;
+  /** Which half was pasted, so the caller can say what it derived. */
+  route: HjudgeSyncRoute;
+  pullUrl: string;
+  pushUrl: string;
+}
+
+/** One endpoint URL, with the token on it. Prod shows these; nothing fetches
+ *  them in this form. */
 export function encodeSyncUrl(
-  credential: HjudgeSyncCredential,
-  route?: 'athletes' | 'results',
+  baseUrl: string,
+  eventId: string,
+  token: string,
+  route: HjudgeSyncRoute,
 ): string {
-  const base = normaliseBaseUrl(credential.baseUrl);
-  const path = route ? `/${route}` : '';
-  return `${base}/api/hyfit-judge/ingest/events/${credential.eventId}${path}?k=${encodeURIComponent(credential.token)}`;
+  const base = normaliseBaseUrl(baseUrl);
+  return `${base}${HJUDGE_INGEST_PATH}/${eventId}/${route}?k=${encodeURIComponent(token)}`;
 }
 
-export function encodeSyncCredential(credential: HjudgeSyncCredential): string {
-  return (
-    HJUDGE_CREDENTIAL_PREFIX +
-    Buffer.from(JSON.stringify(credential), 'utf8').toString('base64url')
-  );
+/** The pair, for the console that has just minted a credential. */
+export function encodeSyncPair(
+  baseUrl: string,
+  eventId: string,
+  token: string,
+): { pullUrl: string; pushUrl: string } {
+  return {
+    pullUrl: encodeSyncUrl(baseUrl, eventId, token, 'config'),
+    pushUrl: encodeSyncUrl(baseUrl, eventId, token, 'results'),
+  };
 }
 
 /**
- * Parse what the operator pasted.
+ * Parse what the operator pasted, and derive the half they did not.
  *
- * Accepts all three shapes an operator might arrive with: the endpoint URL, the
- * connection code, and bare JSON. Whitespace and stray newlines are tolerated,
- * because that is what copying out of a chat window does. Refusing any of these
- * would be a refusal to read something perfectly unambiguous.
+ * Accepts either endpoint. Whitespace and stray newlines are tolerated, because
+ * that is what copying out of a chat window does; refusing a paste that is
+ * perfectly unambiguous apart from a line break is a refusal to read.
+ *
+ * THE PATH IS REBUILT RATHER THAN EDITED. It would be shorter to swap the last
+ * segment of whatever was pasted and keep the rest, and that is exactly the
+ * mistake 086 made in the other direction: it invented a path, the invented one
+ * happened to match, and the day prod served these from somewhere else the
+ * endpoint an operator had pasted was silently ignored. So the ORIGIN and the
+ * EVENT ID are taken from the paste — those are the facts it carries — and the
+ * two URLs are then built from the one path constant this file and the
+ * controller share. If prod ever serves them from a different path, one
+ * constant changes and both ends move together.
  *
  * Throws with a message aimed at the person holding the paste buffer.
  */
-export function decodeSyncCredential(input: string): HjudgeSyncCredential {
-  const raw = String(input ?? '').trim();
-  if (!raw) throw new Error('Paste the connection code from the prod console');
-
-  const compact = raw.replace(/\s+/g, '');
-  let json: string;
-
-  // The URL form. Checked first because it is the one an operator is most
-  // likely to paste, and because everything it needs is on the face of it:
-  // origin, event id in the path, token in `k`. The event name and expiry are
-  // absent, and deliberately not invented — `bind` takes both from the
-  // handshake, which is the authority on them anyway.
-  if (/^https?:\/\//i.test(compact)) {
-    return fromUrl(compact);
-  }
-
-  if (compact.startsWith(HJUDGE_CREDENTIAL_PREFIX)) {
-    const body = compact.slice(HJUDGE_CREDENTIAL_PREFIX.length);
-    try {
-      json = Buffer.from(body, 'base64url').toString('utf8');
-    } catch {
-      throw new Error('That connection code is damaged — copy it again');
-    }
-  } else if (raw.startsWith('{')) {
-    json = raw;
-  } else {
-    throw new Error(
-      `A connection code starts with ${HJUDGE_CREDENTIAL_PREFIX} — this does not`,
-    );
-  }
-
-  let parsed: Partial<HjudgeSyncCredential>;
-  try {
-    parsed = JSON.parse(json) as Partial<HjudgeSyncCredential>;
-  } catch {
-    throw new Error('That connection code is damaged — copy it again');
-  }
-
-  const baseUrl = normaliseBaseUrl(parsed.baseUrl ?? '');
-  const eventId = String(parsed.eventId ?? '').trim();
-  const token = String(parsed.token ?? '').trim();
-
-  if (!baseUrl) throw new Error('The connection code carries no server address');
-  if (!eventId) throw new Error('The connection code names no event');
-  if (!token) throw new Error('The connection code carries no credential');
-
-  return {
-    baseUrl,
-    eventId,
-    eventName: String(parsed.eventName ?? '').trim(),
-    token,
-    expiresAt: String(parsed.expiresAt ?? '').trim(),
-  };
-}
-
-/** Pull a credential out of the URL form. Kept beside the encoder so the two
- *  cannot drift on the parameter name or the path shape. */
-function fromUrl(input: string): HjudgeSyncCredential {
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    throw new Error('That does not look like a URL — copy the endpoint again');
-  }
-
-  const token = (url.searchParams.get('k') ?? '').trim();
-  // `/api/hyfit-judge/ingest/events/<uuid>` — take the segment AFTER `events`
-  // rather than the last one, so the same paste works whether or not somebody
-  // included a trailing `/athletes` or `/results`.
-  const parts = url.pathname.split('/').filter(Boolean);
-  const eventId = parts[parts.indexOf('events') + 1] ?? '';
-
-  if (!token) {
-    throw new Error(
-      'That endpoint has no credential on it. Copy the whole line including the ?k= part — it is the half that makes it work.',
-    );
-  }
-  if (!eventId) {
-    throw new Error('That endpoint names no event — copy it again from prod');
-  }
-
-  return {
-    baseUrl: url.origin,
-    eventId,
-    eventName: '',
-    token,
-    // Unknown from the URL alone; the handshake supplies it.
-    expiresAt: '',
-  };
-}
-
-/**
- * One pasted endpoint, kept whole.
- *
- * WHY THIS EXISTS ALONGSIDE `decodeSyncCredential`. That function answers "what
- * credential is this?" and deliberately discards everything else — origin,
- * event id and token out, path thrown away. That is right for binding, and it
- * is exactly wrong for storing where a push goes: the endpoint prod issued is
- * the endpoint the push has to hit, and rebuilding it from parts means the
- * sender is guessing a path rather than using the one it was given. The guess
- * held for as long as both deployments ran this code at the same prefix.
- *
- * So this returns the URL as pasted, minus its `?k=` — the token comes back
- * separately and travels as a Bearer header, and a URL kept with the secret
- * still on it would put that secret on every screen that renders the endpoint.
- *
- * `expect` names which of the two routes this is meant to be, and is used only
- * to say so when the paste is obviously the other one. It is not enforced
- * beyond that: a venue whose prod publishes results under some other path is
- * not making a mistake, and refusing them on a substring check would be this
- * code guessing again.
- */
-export interface HjudgeIngestEndpoint {
-  /** The URL to POST to, no credential on it. */
-  url: string;
-  /** Origin of `url`, for the handshake and for the console. */
-  baseUrl: string;
-  /** The event id ON PROD, from the `/events/<id>/` segment. */
-  eventId: string;
-  token: string;
-}
-
-export function parseIngestEndpoint(
-  input: string,
-  expect?: 'athletes' | 'results',
-): HjudgeIngestEndpoint {
+export function parseSyncEndpoint(input: string): HjudgeParsedEndpoint {
   const compact = String(input ?? '')
     .trim()
     .replace(/\s+/g, '');
-  const what = expect === 'results' ? 'results' : 'participants';
 
   if (!compact) {
-    throw new Error(`Paste the ${what} endpoint prod gave you for this event`);
+    throw new Error('Paste the sync URL prod gave you for this event');
   }
   if (!/^https?:\/\//i.test(compact)) {
     throw new Error(
-      `The ${what} endpoint is a URL starting with https:// — this does not`,
+      'A sync URL starts with https:// — what you pasted does not. If you have a HYFITSYNC1 code from an older console, mint a fresh credential instead: the code form was retired in 093.',
     );
   }
 
@@ -233,77 +136,81 @@ export function parseIngestEndpoint(
   try {
     url = new URL(compact);
   } catch {
-    throw new Error(`That ${what} endpoint is not a readable URL — copy it again`);
+    throw new Error('That is not a readable URL — copy it again');
   }
 
   const token = (url.searchParams.get('k') ?? '').trim();
   if (!token) {
     throw new Error(
-      `The ${what} endpoint has no credential on it. Copy the whole line including the ?k= part — it is the half that makes it work.`,
+      'That URL has no credential on it. Copy the whole line including the ?k= part — it is the half that makes it work.',
     );
   }
 
-  // The segment AFTER `events`, so the same paste works with or without a
-  // trailing route. If prod ever publishes these under a path with no `events`
-  // segment at all, the operator can still bind with the short code.
+  // The segment AFTER `events`, so the same paste works whichever endpoint it
+  // is and whether or not a trailing slash came with it.
   const parts = url.pathname.split('/').filter(Boolean);
   const at = parts.indexOf('events');
   const eventId = at === -1 ? '' : (parts[at + 1] ?? '');
   if (!eventId) {
-    throw new Error(
-      `That ${what} endpoint names no event — copy it again from prod`,
-    );
+    throw new Error('That URL names no event — copy it again from prod');
   }
 
-  // The one mix-up worth catching, because it is silent otherwise: the same URL
-  // pasted into both boxes sends the roster to the results route and back.
-  const other = expect === 'results' ? 'athletes' : 'results';
-  if (expect && new RegExp(`/${other}/?$`).test(url.pathname)) {
-    throw new Error(
-      `That is the ${other === 'results' ? 'results' : 'participants'} endpoint, pasted into the ${what} box — the two are different URLs.`,
-    );
+  const tail = at === -1 ? '' : (parts[at + 2] ?? '').toLowerCase();
+  const route: HjudgeSyncRoute = tail === 'results' ? 'results' : 'config';
+
+  const baseUrl = url.origin;
+  const pair = encodeSyncPair(baseUrl, eventId, token);
+
+  return {
+    baseUrl,
+    eventId,
+    token,
+    route,
+    // Stored without the `k`: the token lives in its own column and travels as
+    // a Bearer header. Keeping a second copy of it inside a string the console
+    // renders would undo that.
+    pullUrl: stripToken(pair.pullUrl),
+    pushUrl: stripToken(pair.pushUrl),
+  };
+}
+
+/** The endpoint as it is stored and shown: no credential on it. */
+export function stripToken(input: string): string {
+  try {
+    const url = new URL(input);
+    url.searchParams.delete('k');
+    // `URL.toString()` leaves a bare `?` behind once the only parameter is gone.
+    return url.toString().replace(/\?$/, '');
+  } catch {
+    return String(input ?? '').trim();
   }
-
-  url.searchParams.delete('k');
-  // `URL.toString()` leaves a bare `?` behind once the only parameter is gone.
-  const clean = url.toString().replace(/\?$/, '');
-
-  return { url: clean, baseUrl: url.origin, eventId, token };
 }
 
-/** The endpoint this codebase would build for a route, used when a binding
- *  carries no explicit URL — an old row, or a bind from the short code. Kept
- *  beside `encodeSyncUrl` so the two cannot drift on the path shape. */
-export function defaultIngestEndpoint(
-  baseUrl: string,
-  eventId: string,
-  route: 'athletes' | 'results',
-): string {
-  return `${normaliseBaseUrl(baseUrl)}/api/hyfit-judge/ingest/events/${eventId}/${route}`;
-}
-
-/** Move an endpoint onto another origin, keeping its path and query.
+/**
+ * Move an endpoint onto a different origin, keeping its path.
  *
- *  This is what "Change server address" does to the two stored endpoints. The
- *  alternative — leaving them pointing at the old host — makes that control a
- *  no-op on the only field it exists to fix. */
+ * This is what "Change server address" does. Prod moving — a new host, a
+ * tunnel, a laptop pointed at staging for a rehearsal — should be one field an
+ * operator edits, not a re-pairing, and the path below the origin is not the
+ * part that changed.
+ */
 export function rehostEndpoint(url: string, baseUrl: string): string {
   const origin = normaliseBaseUrl(baseUrl);
-  if (!origin || !url) return url;
+  if (!origin) return url;
   try {
     const parsed = new URL(url);
     const next = new URL(origin);
-    parsed.protocol = next.protocol;
-    parsed.host = next.host;
-    return parsed.toString().replace(/\?$/, '');
+    next.pathname = parsed.pathname;
+    next.search = parsed.search;
+    return stripToken(next.toString());
   } catch {
     return url;
   }
 }
 
-/** Origin only, no trailing slash, no path. The handshake appends the API path
- *  itself; a base URL that already carried one would produce
- *  `/api/api/hyfit-judge/...` and a 404 nobody would read as a typo. */
+/** Origin only, no trailing slash, no path. The endpoints carry their own path;
+ *  a base URL that already had one would produce `/api/api/hyfit-judge/...` and
+ *  a 404 nobody would read as a typo. */
 export function normaliseBaseUrl(input: string): string {
   const raw = String(input ?? '').trim();
   if (!raw) return '';
@@ -320,10 +227,10 @@ export function normaliseBaseUrl(input: string): string {
  *
  * Nest's body parser takes 100 KB by default and neither deployment raises it,
  * so the sender is what has to be careful. Rows are measured rather than
- * counted: an athlete row is a couple of hundred bytes or a couple of thousand
- * depending on how much `raw` RaceResult's export carried, and a fixed
- * rows-per-chunk that is safe for the fat case wastes most of the budget on the
- * thin one.
+ * counted: a result row carrying its athlete is a few hundred bytes or a few
+ * thousand depending on how much `raw` RaceResult's export brought with it, and
+ * a fixed rows-per-chunk that is safe for the fat case wastes most of the
+ * budget on the thin one.
  *
  * A single row that will not fit is emitted alone. It will very likely be
  * rejected by the receiver, and that is the right outcome: it fails loudly,
@@ -349,8 +256,7 @@ export function chunkByBytes<T>(rows: T[], maxBytes: number): T[][] {
   if (current.length) chunks.push(current);
   // An empty snapshot is still a push: withdrawing published standings is
   // sending no results, and the receiver needs a final chunk to prune against.
-  // One empty chunk, marked final by the caller. (An empty ROSTER is refused
-  // before it reaches here — see HjudgePushService.pushAthletes.)
+  // One empty chunk, marked final by the caller.
   return chunks.length ? chunks : [[]];
 }
 

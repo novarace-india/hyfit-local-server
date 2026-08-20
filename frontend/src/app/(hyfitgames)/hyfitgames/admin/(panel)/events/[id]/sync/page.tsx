@@ -10,8 +10,14 @@
  * site going quiet. So the role is read-only on this screen, stated at the top,
  * and it decides which panel renders.
  *
- * PROD mints a connection code for one offline event. LOCAL pastes that code,
- * pushes the roster on request, and pushes the standings on a timer.
+ * PROD issues the two URLs for one offline event. LOCAL pastes one of them,
+ * pulls the event's whole configuration down, and pushes the standings back.
+ *
+ * TWO DIRECTIONS, TWO BUTTONS, TWO INTERVALS (093). The pull is prod → local:
+ * the event's name, dates, RaceResult wiring, declaration text, check-in window
+ * and certificate layouts, all entered once on the console an admin already has
+ * open. The push is local → prod: the standings. Each side is the only writer
+ * of what it owns, which is what makes both safe to run on a timer.
  *
  * WHAT IS DELIBERATELY NOT HERE: a control that publishes. Pushing puts the
  * standings in prod's database; whether a reader is served them is the Results
@@ -20,7 +26,7 @@
  * somebody tested the connection.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { judgeApi } from "../../../../../lib/api";
@@ -48,34 +54,31 @@ type Credential = {
 
 type Target = {
     base_url: string;
-    // The two URLs this server really POSTs to, as prod issued them and as the
-    // operator may correct them, without their `?k=`. Before these existed the
-    // sender rebuilt both from `base_url` and the event id, which is why a
-    // pasted results endpoint appeared to do nothing.
-    athletes_url: string;
-    results_url: string;
-    remote_event_id: string;
-    remote_event_name: string;
+    pull_url: string;
+    push_url: string;
     token_prefix: string;
     token_expires_at: string | null;
     enabled: boolean;
     interval_minutes: number;
+    pull_interval_minutes: number;
     auto_import_results: boolean;
-    athletes_pushed_at: string | null;
-    athletes_pushed_rows: number | null;
     results_pushed_at: string | null;
     results_pushed_rows: number | null;
     results_stored_at: string | null;
     results_stored_rows: number | null;
+    config_pulled_at: string | null;
     last_attempt_at: string | null;
     last_status: "ok" | "error" | "skipped" | null;
     last_error: string | null;
+    last_pull_at: string | null;
+    last_pull_status: "ok" | "error" | "skipped" | null;
+    last_pull_error: string | null;
     consecutive_failures: number;
 };
 
 type Run = {
     id: number;
-    kind: "athletes" | "results" | "results_final";
+    kind: "config_pull" | "results" | "results_final";
     trigger_source: "manual" | "schedule";
     status: "ok" | "error" | "skipped";
     rows_sent: number;
@@ -91,9 +94,8 @@ type State = {
     roleWasUnrecognised: boolean;
     event: { id: string; name: string; delivery_mode: DeliveryMode; results_mode: string };
     counts: { athletes: number; results: number };
-    /** Quick picks beside the minutes box — suggestions, not the allowed set. */
-    intervals: number[];
-    intervalBounds: { min: number; max: number };
+    pushIntervals: number[];
+    pullIntervals: number[];
     credentials: Credential[];
     remoteCounts: { athletes: number; results: number };
     target: Target | null;
@@ -115,50 +117,11 @@ const ago = (value: string | null | undefined) => {
 const intervalLabel = (minutes: number) =>
     minutes === 0 ? "Manual only" : minutes === 60 ? "Every hour" : `Every ${minutes} min`;
 
-/* Read a pasted connection code well enough to show what it points at.
- *
- * The backend decodes it again and is the authority — this is purely so the
- * operator can SEE the server address and the event name before pressing
- * Connect, and correct the address if the venue reaches prod by another route.
- * A code that will not decode here simply shows nothing; it is not rejected,
- * because the backend's message is the better one. */
-function peekCode(raw: string): { baseUrl: string; eventName: string; expiresAt: string } | null {
-    const compact = String(raw ?? "").replace(/\s+/g, "");
-    // The endpoint form carries its host on the face of it; the name and expiry
-    // are not in it and come back from prod on Connect.
-    if (/^https?:\/\//i.test(compact)) {
-        try {
-            const u = new URL(compact);
-            return u.searchParams.get("k") ? { baseUrl: u.origin, eventName: "", expiresAt: "" } : null;
-        } catch {
-            return null;
-        }
-    }
-    if (!compact.startsWith("HYFITSYNC1.")) return null;
-    try {
-        const b64 = compact.slice("HYFITSYNC1.".length).replace(/-/g, "+").replace(/_/g, "/");
-        const bytes = Uint8Array.from(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
-        const d = JSON.parse(new TextDecoder().decode(bytes));
-        return {
-            baseUrl: String(d.baseUrl ?? ""),
-            eventName: String(d.eventName ?? ""),
-            expiresAt: String(d.expiresAt ?? ""),
-        };
-    } catch {
-        return null;
-    }
-}
-
-/* base64url of UTF-8, matching `encodeSyncCredential` on the backend.
- *
- * Through TextEncoder rather than straight into btoa, because btoa throws on
- * any character above U+00FF and an event name is free text — "Bengaluru
- * ಓಟ 2026" would take down the one button on this screen that has to work. */
-const base64url = (value: string) =>
-    btoa(String.fromCharCode(...new TextEncoder().encode(value)))
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/, "");
+const RUN_LABEL: Record<Run["kind"], string> = {
+    config_pull: "Configuration pulled",
+    results: "Results → cache",
+    results_final: "Results → database",
+};
 
 export default function SyncPage() {
     const { id: eventId } = useParams<{ id: string }>();
@@ -180,10 +143,9 @@ export default function SyncPage() {
      * here ends in a refetch, and a refetch that re-raised `loading` swapped the
      * whole page for a spinner — which unmounts the panels below and takes their
      * local state with it. The visible symptom was the worst one available: you
-     * pressed Create connection code, the credential really was minted, and the
-     * endpoints you were told to copy "now, because they are not shown again"
-     * vanished in the same tick. The auto-refresh had the same effect every
-     * twenty seconds.
+     * pressed Issue sync URLs, the credential really was minted, and the URLs
+     * you were told to copy "now, because they are not shown again" vanished in
+     * the same tick. The auto-refresh had the same effect every twenty seconds.
      *
      * `refreshing` carries the same information without costing anyone the
      * screen. */
@@ -206,157 +168,129 @@ export default function SyncPage() {
 
     useEffect(() => {
         if (user) void load();
-        else if (ready) setLoading(false);
-    }, [user, ready, load]);
+    }, [user, load]);
 
-    // A push in flight on the server does not tell this page when it lands, and
-    // an operator watching an event go up should not have to press reload to
-    // find out whether it did. Only while the screen is open, and only on a
-    // bound local node — a prod console has nothing that changes on its own.
+    // A venue laptop is watched, not driven: the interesting numbers change
+    // because a timer moved them, not because anybody clicked. Slow enough not
+    // to be a second source of load on the uplink it is reporting about.
     useEffect(() => {
-        if (!state || state.role !== "local" || !state.target?.enabled) return;
-        if (state.target.interval_minutes === 0) return;
+        if (!user) return;
         const timer = setInterval(() => void load(), 20_000);
         return () => clearInterval(timer);
-    }, [state, load]);
-
-    const flash = (text: string) => {
-        setMsg(text);
-        setTimeout(() => setMsg(""), 4000);
-    };
+    }, [user, load]);
 
     const act = async (key: string, fn: () => Promise<string>) => {
         setBusy(key);
         setErr("");
+        setMsg("");
         try {
-            flash(await fn());
-            await load();
+            setMsg(await fn());
         } catch (e: any) {
             setErr(e.message);
         } finally {
             setBusy("");
+            void load();
         }
     };
 
-    const setDeliveryMode = (mode: DeliveryMode) =>
+    const setMode = (mode: DeliveryMode) =>
         act("mode", async () => {
             await judgeApi(scoped("/admin/sync/delivery-mode"), {
                 method: "PUT",
                 body: JSON.stringify({ mode }),
             });
             return mode === "offline"
-                ? "This event now runs on a local server and publishes from prod"
-                : "This event publishes from wherever it runs";
+                ? "This event is now run at a venue and published from here"
+                : "This event now runs and publishes in one place";
         });
 
-    // First paint only — see `load`.
-    if (!ready || (loading && user)) return <Spinner />;
+    if (!ready) return <Spinner />;
+    if (!user) return <FieldSignIn what="the Sync screen" />;
+    if (loading) return <Spinner />;
+    if (!state) return <ErrorNote msg={err || "Could not load the sync state"} />;
 
-    if (!user) {
-        return (
-            <div>
-                <h1 className="text-2xl font-black uppercase tracking-wide">Sync</h1>
-                <p className="mt-1 text-sm text-fog">Offline events: the venue and prod</p>
-                <FieldSignIn what="event sync" />
-            </div>
-        );
-    }
-
-    const offline = state?.event.delivery_mode === "offline";
+    const offline = state.event.delivery_mode === "offline";
 
     return (
-        <div>
-            <Link
-                href="/hyfitgames/admin/events"
-                className="text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
-            >
-                ← All events
-            </Link>
-            <h1 className="mt-2 text-2xl font-black uppercase tracking-wide">Sync</h1>
-            <p className="mt-1 text-sm text-fog">
-                Run this event on a local server at the venue, and publish it from prod
-            </p>
-            <EventPicker eventId={eventId} segment="sync" />
+        <div className="space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <h1 className="text-xl font-black uppercase tracking-wide">Sync</h1>
+                    <p className="mt-0.5 text-xs text-fog">
+                        {state.event.name}
+                        {refreshing && <span className="ml-2 text-fog">· refreshing…</span>}
+                    </p>
+                </div>
+                <EventPicker eventId={eventId} segment="sync" />
+            </div>
 
-            {refreshing && (
-                <p className="mt-2 text-xs font-bold uppercase tracking-widest text-fog">Refreshing…</p>
-            )}
-            {msg && <div className="mt-3 rounded-lg bg-good-soft px-3 py-2 text-sm text-good">{msg}</div>}
+            <RoleBanner state={state} />
+
+            {/* Where this event is run. On prod it is the switch that opens the
+                ingest routes; on a venue laptop it is what the pairing needs to
+                be true. Both copies exist because each gates its own half. */}
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Delivery</h2>
+                <p className="mt-1 text-xs text-fog">
+                    An <strong className="text-chalk">online</strong> event runs and publishes in one place. An{" "}
+                    <strong className="text-chalk">offline</strong> event is run on a laptop at the venue, which pulls
+                    its setup from prod and pushes the standings back.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                    <ModeButton
+                        active={!offline}
+                        disabled={busy === "mode"}
+                        onClick={() => void setMode("online")}
+                        title="Online"
+                    />
+                    <ModeButton
+                        active={offline}
+                        disabled={busy === "mode"}
+                        onClick={() => void setMode("offline")}
+                        title="Offline"
+                    />
+                </div>
+                {!offline && (
+                    <p className="mt-3 text-xs text-fog">
+                        Nothing below applies until this event is set to offline.
+                    </p>
+                )}
+            </div>
+
             <ErrorNote msg={err} />
-
-            {state && (
-                <>
-                    <RoleBanner state={state} />
-
-                    {/* ------------------------------------------- delivery mode */}
-                    <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
-                        <h2 className="text-sm font-bold uppercase tracking-wide">Where this event publishes</h2>
-                        <p className="mt-1 text-xs text-fog">
-                            Set on both servers. Prod&apos;s copy is what lets a push in at all; the local copy is what
-                            turns this screen&apos;s push panel on. Setting only one gives a clear refusal from the other.
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                            <ModeButton
-                                active={!offline}
-                                disabled={busy === "mode"}
-                                onClick={() => void setDeliveryMode("online")}
-                                title="Online"
-                                body="Whichever deployment runs the event also publishes it. Nothing to sync."
-                            />
-                            <ModeButton
-                                active={!!offline}
-                                disabled={busy === "mode"}
-                                onClick={() => void setDeliveryMode("offline")}
-                                title="Offline"
-                                body="A local server runs the event; athletes and results are pushed to prod."
-                            />
-                        </div>
-                    </section>
-
-                    {!offline ? (
-                        <div className="mt-4 rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm text-fog">
-                            This is an online event. Nothing on this screen applies to it — it publishes from wherever it
-                            runs, through the Results screen&apos;s mode, exactly as before.
-                        </div>
-                    ) : state.role === "prod" ? (
-                        <ProdPanel state={state} scoped={scoped} busy={busy} act={act} reload={load} />
-                    ) : (
-                        <LocalPanel state={state} scoped={scoped} busy={busy} act={act} />
-                    )}
-                </>
+            {msg && (
+                <div className="rounded-xl border border-smoke bg-coal p-3 text-sm text-fog">{msg}</div>
             )}
+
+            {!offline ? null : state.role === "prod" ? (
+                <ProdPanel state={state} scoped={scoped} onDone={load} />
+            ) : (
+                <LocalPanel state={state} scoped={scoped} onDone={load} />
+            )}
+
+            <RunHistory runs={state.runs} />
         </div>
     );
 }
 
-/* ------------------------------------------------------------------ shared */
-
 function RoleBanner({ state }: { state: State }) {
     const isProd = state.role === "prod";
     return (
-        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm">
-            <span className="text-xs font-bold uppercase tracking-widest text-fog">This server</span>
-            <Chip tone={isProd ? "live" : "ok"}>{isProd ? "Prod — receives" : "Local — sends"}</Chip>
-            <span className="text-fog">
-                {isProd
-                    ? "It issues connection codes and accepts pushes. It never pushes anywhere itself."
-                    : "It pushes this event's athletes and results up to prod. It accepts no pushes."}
-            </span>
-            {/* The commonest confusion this screen produces: half the feature is
-                on the OTHER server, and a console showing only its own half looks
-                like a console missing controls. Say where they are. */}
-            <span className="w-full text-xs text-fog">
-                {isProd
-                    ? "Looking for the roster sync, the push interval or the results controls? Those live on the venue server's copy of this screen — the one started with HYFIT_NODE_ROLE=local."
-                    : "Connection codes are issued on prod's copy of this screen, not here."}
-            </span>
-            {/* HYFIT_NODE_ROLE holding something unrecognised falls back to prod,
-                which on a venue laptop looks exactly like a laptop refusing to
-                push. Say so rather than letting somebody debug the network. */}
+        <div className="rounded-xl border border-smoke bg-coal p-4">
+            <div className="flex flex-wrap items-center gap-3">
+                <Chip tone={isProd ? "default" : "live"}>{isProd ? "PROD NODE" : "LOCAL NODE"}</Chip>
+                <p className="text-xs text-fog">
+                    {isProd
+                        ? "This server publishes. It issues the sync URLs a venue laptop pastes, and receives what that laptop sends."
+                        : "This server runs the race. It pulls its setup from prod and pushes the standings back."}
+                </p>
+            </div>
             {state.roleWasUnrecognised && (
-                <span className="text-bad">
-                    HYFIT_NODE_ROLE was not understood and defaulted to prod — set it to `local` or `prod`.
-                </span>
+                <p className="mt-2 text-xs text-hyred-ink">
+                    HYFIT_NODE_ROLE holds something this build does not recognise, so it has fallen back to{" "}
+                    <strong>prod</strong>. On a venue laptop that looks exactly like a laptop refusing to sync — set it
+                    to <code>local</code> and restart.
+                </p>
             )}
         </div>
     );
@@ -367,26 +301,21 @@ function ModeButton({
     disabled,
     onClick,
     title,
-    body,
 }: {
     active: boolean;
     disabled: boolean;
     onClick: () => void;
     title: string;
-    body: string;
 }) {
     return (
         <button
-            onClick={onClick}
             disabled={disabled || active}
-            className={`min-w-64 flex-1 rounded-lg border px-3 py-2.5 text-left transition disabled:cursor-default ${
-                active ? "border-hyred bg-hyred/10" : "border-smoke hover:border-fog"
+            onClick={onClick}
+            className={`rounded-lg border px-4 py-2 text-xs font-bold uppercase tracking-widest disabled:opacity-60 ${
+                active ? "border-hyred bg-hyred text-onfill" : "border-smoke text-fog hover:text-chalk"
             }`}
         >
-            <span className="text-sm font-bold uppercase tracking-wide">
-                {title} {active && <span className="text-hyred-ink">· current</span>}
-            </span>
-            <span className="mt-1 block text-xs text-fog">{body}</span>
+            {title}
         </button>
     );
 }
@@ -403,21 +332,22 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 
 /* One endpoint, ready to copy.
  *
- * Numbered because the two really are ordered — the roster has to land before
- * the standings can reference it — and labelled by DESTINATION rather than by
- * route, because "into the database" and "into Valkey" is the distinction an
- * operator needs and `/athletes` vs `/results` is not. */
+ * Labelled by DIRECTION rather than by route, because "what the venue reads"
+ * and "what the venue sends" is the distinction an operator needs and
+ * `/config` vs `/results` is not. Both carry the same credential, so pasting
+ * either one into the venue server connects it for both — which is said out
+ * loud below, because an operator who believes they need both will go looking
+ * for a second box to put one in.
+ */
 function EndpointField({
-    step,
     title,
-    destination,
+    direction,
     url,
     copied,
     onCopy,
 }: {
-    step: string;
     title: string;
-    destination: string;
+    direction: string;
     url: string;
     copied: boolean;
     onCopy: () => void;
@@ -426,10 +356,8 @@ function EndpointField({
         <div className="rounded-lg border border-smoke bg-ink p-3">
             <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
-                    <span className="text-xs font-bold uppercase tracking-widest text-fog">
-                        {step} · {title}
-                    </span>
-                    <span className="mt-0.5 block text-xs text-fog">{destination}</span>
+                    <span className="text-xs font-bold uppercase tracking-widest text-fog">{title}</span>
+                    <span className="mt-0.5 block text-xs text-fog">{direction}</span>
                 </div>
                 <button
                     onClick={onCopy}
@@ -449,447 +377,216 @@ function EndpointField({
     );
 }
 
-/* How often the standings go up, as a number of minutes.
- *
- * A BOX AND NOT A DROPDOWN. The dropdown offered nine values and the column's
- * CHECK enforced the same nine, so a venue asking to push every seven minutes
- * got a constraint name. The nine are still here as one-tap presets — they are
- * good defaults and tapping beats typing at a venue — but they are suggestions
- * now, and anything from 0 (manual only) to a day is a valid answer.
- *
- * UNCONTROLLED-ISH ON PURPOSE: the value is held as a STRING while the operator
- * types, because a number input mid-edit is legitimately "" or "1" on the way
- * to "15", and coercing each keystroke to a number makes the field fight back. */
-function IntervalField({
-    minutes,
-    onChange,
-    onCommit,
-    presets,
-    bounds,
-    disabled,
-    step,
-    hint,
-}: {
-    minutes: string;
-    onChange: (value: string) => void;
-    onCommit?: (value: number) => void;
-    presets: number[];
-    bounds: { min: number; max: number };
-    disabled: boolean;
-    step?: string;
-    hint?: string;
-}) {
-    const parsed = Number(minutes);
-    const valid =
-        minutes.trim() !== "" &&
-        Number.isInteger(parsed) &&
-        parsed >= bounds.min &&
-        parsed <= bounds.max;
-
-    const commit = (value: number) => {
-        onChange(String(value));
-        onCommit?.(value);
-    };
-
-    return (
-        <div className="text-xs">
-            <span className="font-bold uppercase tracking-widest text-fog">
-                {step ? `${step} · ` : ""}Push results every
-            </span>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-                <input
-                    type="number"
-                    inputMode="numeric"
-                    min={bounds.min}
-                    max={bounds.max}
-                    step={1}
-                    value={minutes}
-                    disabled={disabled}
-                    onChange={(e) => onChange(e.target.value)}
-                    // Committed on blur and on Enter rather than per keystroke:
-                    // a PUT for every digit of "15" would also push "1".
-                    onBlur={() => valid && onCommit?.(parsed)}
-                    onKeyDown={(e) => {
-                        if (e.key === "Enter" && valid) {
-                            e.currentTarget.blur();
-                        }
-                    }}
-                    className="w-24 rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred disabled:opacity-40"
-                />
-                <span className="text-sm text-fog">minutes</span>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-                {presets.map((m) => (
-                    <button
-                        key={m}
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => commit(m)}
-                        className={`rounded-lg border px-2 py-1 text-[11px] font-bold uppercase tracking-widest transition disabled:opacity-40 ${
-                            parsed === m ? "border-hyred bg-hyred/10 text-chalk" : "border-smoke text-fog hover:text-chalk"
-                        }`}
-                    >
-                        {m === 0 ? "Manual" : `${m}m`}
-                    </button>
-                ))}
-            </div>
-            <p className="mt-1.5 text-fog">
-                {!valid && minutes.trim() !== ""
-                    ? `A whole number of minutes from ${bounds.min} to ${bounds.max}.`
-                    : parsed === 0
-                      ? "Manual only — the standings go up when somebody presses Push results."
-                      : (hint ??
-                        `Every ${parsed} minute${parsed === 1 ? "" : "s"}, on this server's own timer — closing the console does not stop it.`)}
-            </p>
-        </div>
-    );
-}
-
-/* One stored endpoint, shown and editable in place.
- *
- * Shown WITHOUT its `?k=`, because this is a screen and the key is a password;
- * the credential is bound already and pasting a fresh URL only changes the
- * address. A paste carrying a DIFFERENT credential is refused by the backend
- * with the reason, rather than half-rebinding the event. */
-function EditableEndpoint({
-    title,
-    destination,
-    url,
-    busy,
-    onSave,
-}: {
-    title: string;
-    destination: string;
-    url: string;
-    busy: boolean;
-    onSave: (next: string) => Promise<void>;
-}) {
-    const [editing, setEditing] = useState(false);
-    const [draft, setDraft] = useState(url);
-
-    return (
-        <div className="rounded-lg border border-smoke bg-ink p-3">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="min-w-0">
-                    <span className="text-xs font-bold uppercase tracking-widest text-fog">{title}</span>
-                    <span className="mt-0.5 block text-xs text-fog">{destination}</span>
-                </div>
-                {!editing && (
-                    <button
-                        onClick={() => {
-                            setDraft(url);
-                            setEditing(true);
-                        }}
-                        className="text-xs font-bold uppercase tracking-widest text-fog underline hover:text-chalk"
-                    >
-                        Change
-                    </button>
-                )}
-            </div>
-
-            {editing ? (
-                <>
-                    <textarea
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        rows={3}
-                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…?k=…"
-                        className="mt-2 w-full break-all rounded-lg border border-smoke bg-coal px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
-                    />
-                    <span className="mt-1 block text-xs text-fog">
-                        Paste the whole line including the <code>?k=</code>. It must be the same credential this event
-                        is already connected with.
-                    </span>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                        <button
-                            onClick={async () => {
-                                await onSave(draft.trim());
-                                setEditing(false);
-                            }}
-                            disabled={busy || !draft.trim()}
-                            className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
-                        >
-                            Save
-                        </button>
-                        <button
-                            onClick={() => setEditing(false)}
-                            className="text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
-                        >
-                            Cancel
-                        </button>
-                    </div>
-                </>
-            ) : (
-                <p className="mt-2 break-all font-mono text-xs text-chalk">{url || "— not set —"}</p>
-            )}
-        </div>
-    );
-}
-
 /* -------------------------------------------------------------------- prod */
 
 function ProdPanel({
     state,
     scoped,
-    busy,
-    act,
-    reload,
+    onDone,
 }: {
     state: State;
-    scoped: (path: string) => string;
-    busy: string;
-    act: (key: string, fn: () => Promise<string>) => Promise<void>;
-    reload: () => Promise<void>;
+    scoped: (p: string) => string;
+    onDone: () => void;
 }) {
     const [label, setLabel] = useState("");
     const [hours, setHours] = useState(72);
-    const [baseUrl, setBaseUrl] = useState("");
-    // The minted secret, held for exactly as long as this page is open. It is
-    // not in the state fetched above and cannot be — only its hash was stored —
-    // so navigating away is the same as losing it, and the panel says so.
-    const [code, setCode] = useState("");
-    const [urls, setUrls] = useState<{ athletes: string; results: string } | null>(null);
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState("");
     const [copied, setCopied] = useState("");
+    const [issued, setIssued] = useState<{
+        pullUrl: string;
+        pushUrl: string;
+        expiresAt: string;
+        baseUrlMissing: boolean;
+    } | null>(null);
 
-    useEffect(() => {
-        if (typeof window !== "undefined") setBaseUrl(window.location.origin);
-    }, []);
-
-    const mint = () =>
-        act("mint", async () => {
+    const mint = async () => {
+        setBusy(true);
+        setErr("");
+        try {
             const created = await judgeApi<{
-                credential: { eventId: string; eventName: string; token: string; expiresAt: string };
+                expiresAt: string;
+                pullUrl: string;
+                pushUrl: string;
+                baseUrlMissing: boolean;
             }>(scoped("/admin/sync/credentials"), {
                 method: "POST",
                 body: JSON.stringify({ label, hours }),
             });
-            // The code is assembled here because prod does not reliably know the
-            // address a venue can actually reach it on — behind a load balancer
-            // it sees an internal host. The browser that is already talking to
-            // it does know, and the field stays editable for a tunnel or an IP.
-            const origin = baseUrl.replace(/\/+$/, "");
-            // Two endpoints, one credential. An operator setting this up thinks
-            // in terms of "where does the roster go and where do the results
-            // go", and the answer is two different destinations — so it is two
-            // labelled lines to copy, not one with a footnote.
-            const endpoint = (route: string) =>
-                `${origin}/api/hyfit-judge/ingest/events/${created.credential.eventId}/${route}` +
-                `?k=${encodeURIComponent(created.credential.token)}`;
-            setUrls({ athletes: endpoint("athletes"), results: endpoint("results") });
-            setCode(
-                "HYFITSYNC1." +
-                    base64url(
-                        JSON.stringify({
-                            baseUrl: baseUrl.replace(/\/+$/, ""),
-                            eventId: created.credential.eventId,
-                            eventName: created.credential.eventName,
-                            token: created.credential.token,
-                            expiresAt: created.credential.expiresAt,
-                        }),
-                    ),
-            );
-            setCopied("");
+            setIssued(created);
             setLabel("");
-            return "Endpoint created — copy it now, it is not shown again";
-        });
+            onDone();
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy(false);
+        }
+    };
 
-    const revoke = (id: string, name: string) =>
-        act(`revoke:${id}`, async () => {
+    const revoke = async (id: string) => {
+        setBusy(true);
+        setErr("");
+        try {
             await judgeApi(scoped(`/admin/sync/credentials/${id}`), { method: "DELETE" });
-            return `${name} revoked — the next push from it will be refused`;
-        });
+            onDone();
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const copy = async (which: string, url: string) => {
+        try {
+            await navigator.clipboard.writeText(url);
+            setCopied(which);
+            setTimeout(() => setCopied(""), 2000);
+        } catch {
+            /* The textarea is selectable; a blocked clipboard is not an error
+               worth a red box over. */
+        }
+    };
 
     return (
-        <>
-            <section className="mt-4 grid gap-3 sm:grid-cols-3">
-                <Stat label="Athletes here" value={String(state.remoteCounts?.athletes ?? 0)} hint="Pushed from the venue" />
-                <Stat label="Results here" value={String(state.remoteCounts?.results ?? 0)} hint="Pushed from the venue" />
-                <Stat
-                    label="Published"
-                    value={state.event.results_mode === "off" ? "Nothing" : state.event.results_mode}
-                    hint="Set on the Results screen"
-                />
-            </section>
-
-            {/* A push fills the tables; it does not decide what a reader is
-                served. Say where that switch is rather than duplicating it. */}
-            {state.event.results_mode === "off" && (state.remoteCounts?.results ?? 0) > 0 && (
-                <div className="mt-3 rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm text-fog">
-                    {state.remoteCounts.results} result rows have arrived but nothing is published yet. Set this
-                    event&apos;s mode to <span className="font-bold text-chalk">stored</span> on{" "}
-                    <Link
-                        href={`/hyfitgames/admin/events/${state.event.id}/results`}
-                        className="font-bold text-chalk underline"
-                    >
-                        Results
-                    </Link>{" "}
-                    when you want athletes to see them.
+        <div className="space-y-5">
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">What this server holds</h2>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Stat
+                        label="Athletes"
+                        value={String(state.remoteCounts?.athletes ?? 0)}
+                        hint="Written by the venue's results pushes"
+                    />
+                    <Stat label="Results" value={String(state.remoteCounts?.results ?? 0)} />
                 </div>
-            )}
+            </div>
 
-            <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
-                <h2 className="text-sm font-bold uppercase tracking-wide">Issue a connection code</h2>
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Issue the sync URLs</h2>
                 <p className="mt-1 text-xs text-fog">
-                    One code, one event, two routes — the roster and the standings. It cannot reach staff, PINs,
-                    check-in or the RaceResult endpoints. Carry it to the venue and paste it into the local
-                    server&apos;s Sync screen.
+                    One credential, two endpoints. The venue laptop pastes{" "}
+                    <strong className="text-chalk">either one</strong> and gets both.
                 </p>
 
                 <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                    <label className="text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">Which machine</span>
+                    <div className="sm:col-span-2">
+                        <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-fog">
+                            Label
+                        </label>
                         <input
                             value={label}
                             onChange={(e) => setLabel(e.target.value)}
                             placeholder="Bengaluru laptop"
-                            className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
+                            className="w-full rounded-lg border border-smoke bg-ink px-3 py-2.5 text-sm outline-none focus:border-hyred"
                         />
-                    </label>
-                    <label className="text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">Valid for</span>
-                        <select
+                    </div>
+                    <div>
+                        <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-fog">
+                            Valid for (hours)
+                        </label>
+                        <input
+                            type="number"
+                            min={1}
+                            max={2160}
                             value={hours}
                             onChange={(e) => setHours(Number(e.target.value))}
-                            className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
-                        >
-                            {[12, 24, 48, 72, 168].map((h) => (
-                                <option key={h} value={h}>
-                                    {h < 24 ? `${h} hours` : `${h / 24} day${h === 24 ? "" : "s"}`}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className="text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">Address the venue reaches</span>
-                        <input
-                            value={baseUrl}
-                            onChange={(e) => setBaseUrl(e.target.value)}
-                            placeholder="https://app.example.com"
-                            className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 text-sm outline-none focus:border-hyred"
+                            className="w-full rounded-lg border border-smoke bg-ink px-3 py-2.5 text-sm outline-none focus:border-hyred"
                         />
-                    </label>
+                    </div>
                 </div>
 
-                <button
-                    onClick={() => void mint()}
-                    disabled={!!busy || !baseUrl.trim()}
-                    className="mt-3 rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
-                >
-                    {busy === "mint" ? "Creating…" : "Create connection code"}
-                </button>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                        disabled={busy}
+                        onClick={() => void mint()}
+                        className="rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                    >
+                        {busy ? "Issuing…" : "Issue sync URLs"}
+                    </button>
+                    <ErrorNote msg={err} />
+                </div>
 
-                {urls && (
-                    <div className="mt-4 rounded-lg border border-hyred bg-hyred/10 p-3">
-                        <span className="text-xs font-bold uppercase tracking-widest text-hyred-ink">
-                            Copy these now — they are not stored and cannot be shown again
-                        </span>
-
-                        <div className="mt-3 flex flex-col gap-3">
-                            <EndpointField
-                                step="1"
-                                title="Participants"
-                                destination="into this server's database"
-                                url={urls.athletes}
-                                copied={copied === "athletes"}
-                                onCopy={() => {
-                                    void navigator.clipboard?.writeText(urls.athletes);
-                                    setCopied("athletes");
-                                }}
-                            />
-                            <EndpointField
-                                step="2"
-                                title="Results"
-                                destination="into this server's Valkey, on the venue's interval"
-                                url={urls.results}
-                                copied={copied === "results"}
-                                onCopy={() => {
-                                    void navigator.clipboard?.writeText(urls.results);
-                                    setCopied("results");
-                                }}
-                            />
-                        </div>
-
-                        <p className="mt-3 text-xs text-fog">
-                            Copy <span className="font-bold text-chalk">both</span> — the venue server has a box for
-                            each, and stores each one as sent rather than rebuilding it. They carry the same credential;
-                            the <code>?k=</code> is the key, so copy each line whole and treat it as a password.
+                {issued && (
+                    <div className="mt-4 space-y-3 rounded-lg border border-hyred bg-ink p-4">
+                        <p className="text-xs font-bold uppercase tracking-widest text-hyred-ink">
+                            Copy one of these now — they are not shown again
+                        </p>
+                        <p className="text-xs text-fog">
+                            The credential in them is stored here only as a hash. If it is lost, issue another; there is
+                            no way to read this one back.
                         </p>
 
-                        {/* The same credential, compact. A long URL with a key
-                            on it survives a chat window less reliably than one
-                            opaque string does. */}
-                        <details className="mt-3 border-t border-smoke pt-3">
-                            <summary className="cursor-pointer text-xs font-bold uppercase tracking-widest text-fog">
-                                Or copy it as a short code instead
-                            </summary>
-                            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-                                <span className="text-xs text-fog">Same credential, one opaque string.</span>
-                                <button
-                                    onClick={() => {
-                                        void navigator.clipboard?.writeText(code);
-                                        setCopied("code");
-                                    }}
-                                    className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
-                                >
-                                    {copied === "code" ? "Copied" : "Copy code"}
-                                </button>
-                            </div>
-                            <textarea
-                                readOnly
-                                value={code}
-                                rows={3}
-                                onFocus={(e) => e.currentTarget.select()}
-                                className="mt-1.5 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none"
-                            />
-                        </details>
+                        {issued.baseUrlMissing ? (
+                            <p className="text-xs text-hyred-ink">
+                                This deployment does not know its own public address, so the URLs could not be built.
+                                Set <code>HYFIT_PUBLIC_BASE_URL</code> to the address a venue laptop can reach it on and
+                                restart, then issue again.
+                            </p>
+                        ) : (
+                            <>
+                                <EndpointField
+                                    title="Configuration"
+                                    direction="Prod → venue. The event and how it is set up."
+                                    url={issued.pullUrl}
+                                    copied={copied === "pull"}
+                                    onCopy={() => void copy("pull", issued.pullUrl)}
+                                />
+                                <EndpointField
+                                    title="Results"
+                                    direction="Venue → prod. The standings."
+                                    url={issued.pushUrl}
+                                    copied={copied === "push"}
+                                    onCopy={() => void copy("push", issued.pushUrl)}
+                                />
+                                <p className="text-xs text-fog">
+                                    Expires {when(issued.expiresAt)}.
+                                </p>
+                            </>
+                        )}
                     </div>
                 )}
-            </section>
+            </div>
 
-            <section className="mt-6">
-                <h2 className="text-sm font-bold uppercase tracking-wide">Codes for this event</h2>
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Credentials</h2>
                 {!state.credentials.length ? (
-                    <Empty title="No connection codes yet" hint="Create one above and carry it to the venue" />
+                    <Empty title="None issued" hint="A venue laptop needs one to reach this event." />
                 ) : (
                     <div className="mt-3 space-y-2">
                         {state.credentials.map((c) => (
-                            <div key={c.id} className="rounded-xl border border-smoke bg-coal p-3">
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <span className="font-bold">{c.label || "Unlabelled"}</span>
-                                            {c.live ? (
-                                                <Chip tone="live">Live</Chip>
-                                            ) : c.revoked_at ? (
-                                                <Chip>Revoked</Chip>
-                                            ) : (
-                                                <Chip>Expired</Chip>
-                                            )}
-                                            {c.scopes.map((s) => (
-                                                <Chip key={s}>{s}</Chip>
-                                            ))}
-                                        </div>
-                                        <p className="mt-1 font-mono text-xs text-fog">{c.token_prefix}…</p>
-                                        <p className="mt-1 text-xs text-fog">
-                                            Expires {when(c.expires_at)} · used {c.use_count} time
-                                            {c.use_count === 1 ? "" : "s"} · last {ago(c.last_used_at)}
-                                            {c.last_used_ip ? ` from ${c.last_used_ip}` : ""}
-                                        </p>
+                            <div
+                                key={c.id}
+                                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-smoke bg-ink p-3"
+                            >
+                                <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="font-bold">{c.label || "Unlabelled"}</span>
+                                        <Chip tone={c.live ? "ok" : "default"}>
+                                            {c.revoked_at ? "revoked" : c.live ? "live" : "expired"}
+                                        </Chip>
+                                        <code className="text-xs text-fog">{c.token_prefix}…</code>
                                     </div>
-                                    <button
-                                        onClick={() => void revoke(c.id, c.label || "That code")}
-                                        disabled={!c.live || !!busy}
-                                        className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
-                                    >
-                                        {busy === `revoke:${c.id}` ? "Revoking…" : "Revoke"}
-                                    </button>
+                                    <div className="mt-1 text-xs text-fog">
+                                        {c.scopes.join(" + ")} · expires {when(c.expires_at)} · used {c.use_count}×
+                                        {c.last_used_at ? ` · last ${ago(c.last_used_at)}` : " · never used"}
+                                        {c.last_used_ip ? ` from ${c.last_used_ip}` : ""}
+                                    </div>
                                 </div>
+                                {!c.revoked_at && (
+                                    <button
+                                        disabled={busy}
+                                        onClick={() => void revoke(c.id)}
+                                        className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-hyred-ink disabled:opacity-40"
+                                    >
+                                        Revoke
+                                    </button>
+                                )}
                             </div>
                         ))}
                     </div>
                 )}
-            </section>
-        </>
+            </div>
+        </div>
     );
 }
 
@@ -898,561 +595,501 @@ function ProdPanel({
 function LocalPanel({
     state,
     scoped,
-    busy,
-    act,
+    onDone,
 }: {
     state: State;
-    scoped: (path: string) => string;
-    busy: string;
-    act: (key: string, fn: () => Promise<string>) => Promise<void>;
+    scoped: (p: string) => string;
+    onDone: () => void;
 }) {
-    // Two boxes, because prod issues two endpoints and they are two different
-    // destinations. The old single box parsed whichever one you pasted for its
-    // credential and then rebuilt both URLs itself — so a results endpoint that
-    // did not match what this code would have invented was accepted, stored
-    // nowhere, and never called.
-    const [athletesUrl, setAthletesUrl] = useState("");
-    const [resultsUrl, setResultsUrl] = useState("");
-    const [code, setCode] = useState("");
-    const [baseUrl, setBaseUrl] = useState("");
-    // What the box shows. Seeded from the binding when there is one, so the
-    // connected panel opens on the interval this event is actually running.
-    const [minutes, setMinutes] = useState(String(state.target?.interval_minutes ?? 5));
-    // Changing where an already-bound event pushes, without re-pasting anything:
-    // a tunnel restarting on a new host is not a reason to go back to whoever
-    // holds the prod console for a fresh credential.
-    const [editingUrl, setEditingUrl] = useState(false);
-    const [urlDraft, setUrlDraft] = useState("");
     const target = state.target;
-    const savedMinutes = target?.interval_minutes;
+    const [busy, setBusy] = useState("");
+    const [err, setErr] = useState("");
+    const [msg, setMsg] = useState("");
 
-    // Follow the server's value, not every refetch. The page reloads itself
-    // every twenty seconds while a bound event is pushing, and re-seeding the
-    // box on each of those would erase a half-typed number under the operator's
-    // hands. This only fires when the SAVED interval actually changed — which
-    // is either their own commit landing, or somebody on another console.
-    useEffect(() => {
-        if (savedMinutes !== undefined) setMinutes(String(savedMinutes));
-    }, [savedMinutes]);
-
-    const bind = () =>
-        act("bind", async () => {
-            // The two-endpoint form is what the screen leads with; the short
-            // code stays as a fallback and wins only when the boxes are empty.
-            const pasted = athletesUrl.trim() || resultsUrl.trim();
-            const parsed = Number(minutes);
-            const bound = await judgeApi<{ remote: { event: { name: string } } }>(scoped("/admin/sync/bind"), {
-                method: "POST",
-                body: JSON.stringify({
-                    ...(pasted
-                        ? { athletesUrl: athletesUrl.trim(), resultsUrl: resultsUrl.trim() }
-                        : { code }),
-                    baseUrl: baseUrl.trim() || undefined,
-                    // Omitted rather than coerced when the box is empty:
-                    // `Number("")` is 0, and 0 means "manual only" — a blank
-                    // field must not quietly switch the timer off.
-                    intervalMinutes:
-                        minutes.trim() !== "" && Number.isInteger(parsed) ? parsed : undefined,
-                }),
-            });
-            setCode("");
-            setAthletesUrl("");
-            setResultsUrl("");
-            return `Connected to "${bound.remote.event.name}" on prod`;
-        });
-
-    const unbind = () =>
-        act("unbind", async () => {
-            await judgeApi(scoped("/admin/sync/bind"), { method: "DELETE" });
-            return "Disconnected — nothing already pushed was withdrawn";
-        });
-
-    const check = () =>
-        act("check", async () => {
-            const seen = await judgeApi<{ remote: { event: { name: string }; counts: { athletes: number; results: number } } }>(
-                scoped("/admin/sync/check"),
-                { method: "POST" },
-            );
-            return `Prod answered for "${seen.remote.event.name}" — it holds ${seen.remote.counts.athletes} athletes and ${seen.remote.counts.results} results`;
-        });
-
-    const push = (kind: "athletes" | "results" | "results_final") =>
-        act(`push:${kind}`, async () => {
-            const done = await judgeApi<{ status: string; rows: number; chunks: number; durationMs: number }>(
-                scoped("/admin/sync/push"),
-                { method: "POST", body: JSON.stringify({ kind }) },
-            );
-            const what =
-                kind === "athletes"
-                    ? "athlete row(s) pushed"
-                    : kind === "results_final"
-                      ? "result row(s) written to prod's database"
-                      : "result row(s) pushed to prod's cache";
-            return `${done.rows} ${what} in ${done.chunks} request(s), ${done.durationMs}ms`;
-        });
-
-    const configure = (patch: {
-        intervalMinutes?: number;
-        enabled?: boolean;
-        autoImportResults?: boolean;
-        baseUrl?: string;
-        athletesUrl?: string;
-        resultsUrl?: string;
-    }) =>
-        act("configure", async () => {
-            await judgeApi(scoped("/admin/sync/config"), { method: "PUT", body: JSON.stringify(patch) });
-            if (patch.athletesUrl !== undefined) return "Participants endpoint saved";
-            if (patch.resultsUrl !== undefined)
-                return "Results endpoint saved — the next push goes there, even if the standings have not changed";
-            if (patch.baseUrl !== undefined) return `Now pushing to ${patch.baseUrl}`;
-            if (patch.enabled !== undefined)
-                return patch.enabled ? "Automatic pushes resumed" : "Automatic pushes paused";
-            if (patch.autoImportResults !== undefined)
-                return patch.autoImportResults
-                    ? "Standings will be re-imported from RaceResult before each scheduled push"
-                    : "Only what you import by hand will be pushed";
-            return patch.intervalMinutes === 0
-                ? "Results will now be pushed only when you press Push results"
-                : `Results will be pushed every ${patch.intervalMinutes} minute${patch.intervalMinutes === 1 ? "" : "s"}`;
-        });
+    const act = async (key: string, fn: () => Promise<string>) => {
+        setBusy(key);
+        setErr("");
+        setMsg("");
+        try {
+            setMsg(await fn());
+        } catch (e: any) {
+            setErr(e.message);
+        } finally {
+            setBusy("");
+            onDone();
+        }
+    };
 
     if (!target) {
-        const peek = peekCode(athletesUrl || resultsUrl || code);
-        // The address the endpoints carry, unless the operator has typed over it.
-        const effectiveUrl = baseUrl.trim() || peek?.baseUrl || "";
-        const usingCode = !athletesUrl.trim() && !resultsUrl.trim();
-        const ready = usingCode ? !!code.trim() : !!(athletesUrl.trim() && resultsUrl.trim());
-
         return (
-            <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
-                <h2 className="text-sm font-bold uppercase tracking-wide">Connect to prod</h2>
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Not paired</h2>
                 <p className="mt-1 text-xs text-fog">
-                    Paste both endpoints prod gave you for this event, set how often the standings should go up, and
-                    check the server address they point at. Nothing is stored until prod confirms which event they open.
+                    This event exists on this laptop but is not connected to prod. Events are normally created BY
+                    pairing — from the{" "}
+                    <Link
+                        href="/hyfitgames/admin/events"
+                        className="underline underline-offset-4 hover:text-hyred-ink"
+                    >
+                        Events
+                    </Link>{" "}
+                    screen, by pasting the sync URL prod issued. An event that got here another way cannot be paired
+                    retroactively: prod's event has its own id, and pairing is what makes the two ids the same one.
                 </p>
-
-                {/* TWO BOXES, BECAUSE THERE ARE TWO ENDPOINTS. They share one
-                    credential but they are two destinations, and each is stored
-                    and called as pasted. The single box this replaces read the
-                    credential off whichever URL you gave it and then rebuilt
-                    both addresses itself — so a results endpoint that did not
-                    match the one this code invents was accepted and then never
-                    used, with nothing on the screen to show it. */}
-                <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">
-                        1 · Participants endpoint
-                    </span>
-                    <span className="mt-0.5 block text-fog">
-                        Where the start list goes — into prod&apos;s database.
-                    </span>
-                    <textarea
-                        value={athletesUrl}
-                        onChange={(e) => setAthletesUrl(e.target.value)}
-                        rows={3}
-                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…/athletes?k=…"
-                        className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
-                    />
-                </label>
-
-                <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">2 · Results endpoint</span>
-                    <span className="mt-0.5 block text-fog">
-                        Where the standings go — into prod&apos;s cache, on the interval below.
-                    </span>
-                    <textarea
-                        value={resultsUrl}
-                        onChange={(e) => setResultsUrl(e.target.value)}
-                        rows={3}
-                        placeholder="https://app.example.com/api/hyfit-judge/ingest/events/…/results?k=…"
-                        className="mt-1 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
-                    />
-                </label>
-
-                <div className="mt-3">
-                    <IntervalField
-                        minutes={minutes}
-                        onChange={setMinutes}
-                        presets={state.intervals}
-                        bounds={state.intervalBounds}
-                        disabled={!!busy}
-                        step="3"
-                    />
-                </div>
-
-                {/* Not an "override": the address prod is reachable on is a
-                    thing the venue operator owns. The endpoints fill it in, and
-                    the field stays editable because the address prod knows about
-                    itself and the address the venue can reach are routinely
-                    different — a load balancer, a tunnel, a LAN IP. Changing it
-                    moves both endpoints above onto that host. */}
-                <label className="mt-3 block text-xs">
-                    <span className="font-bold uppercase tracking-widest text-fog">4 · Prod server address</span>
-                    <input
-                        value={baseUrl}
-                        onChange={(e) => setBaseUrl(e.target.value)}
-                        placeholder={peek?.baseUrl || "https://app.example.com"}
-                        className="mt-1 w-full rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-sm outline-none focus:border-hyred"
-                    />
-                    <span className="mt-1 block text-fog">
-                        {peek?.baseUrl && !baseUrl.trim()
-                            ? "Taken from the endpoints above. Leave it unless this venue reaches prod another way."
-                            : "The origin only — no path. Both endpoints above are moved onto it. This server must be able to reach it."}
-                    </span>
-                </label>
-
-                {peek && (
-                    <div className="mt-3 rounded-lg border border-smoke bg-ink p-3 text-xs">
-                        <span className="font-bold uppercase tracking-widest text-fog">This will push to</span>
-                        <p className="mt-1 break-all font-mono text-chalk">{effectiveUrl}</p>
-                        {peek.eventName && (
-                            <p className="mt-1 text-chalk">
-                                {peek.eventName}
-                                {peek.expiresAt ? ` · expires ${when(peek.expiresAt)}` : ""}
-                            </p>
-                        )}
-                        <p className="mt-1 text-fog">
-                            Prod will name the event when you press Connect. Check it matches the race in front of you.
-                        </p>
-                    </div>
-                )}
-
-                <button
-                    onClick={() => void bind()}
-                    disabled={!!busy || !ready}
-                    className="mt-3 rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
-                >
-                    {busy === "bind" ? "Checking with prod…" : "Connect"}
-                </button>
-
-                {/* The compact form of the same credential. Kept because a long
-                    URL with a key on it survives a chat window less reliably
-                    than one opaque string — but folded away, because it carries
-                    no paths and so binds to the endpoints this code guesses,
-                    which is the thing the two boxes above exist to stop. */}
-                <details className="mt-4 border-t border-smoke pt-3">
-                    <summary className="cursor-pointer text-xs font-bold uppercase tracking-widest text-fog">
-                        Or paste the short connection code instead
-                    </summary>
-                    <textarea
-                        value={code}
-                        onChange={(e) => setCode(e.target.value)}
-                        rows={3}
-                        placeholder="HYFITSYNC1.…"
-                        className="mt-2 w-full break-all rounded-lg border border-smoke bg-ink px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
-                    />
-                    <span className="mt-1 block text-xs text-fog">
-                        Used only while both boxes above are empty. It carries the server, the event and the
-                        credential — but no paths, so the two endpoints are assembled from the standard routes and can
-                        be corrected afterwards.
-                    </span>
-                </details>
-
-                {/* Everything below only exists once there is somewhere to push
-                    to, so before that this screen is a form and a button — and
-                    looks like a screen with its controls missing. Name them. */}
-                <div className="mt-4 border-t border-smoke pt-3 text-xs text-fog">
-                    <span className="font-bold uppercase tracking-widest">Once connected, this page gains</span>
-                    <ul className="mt-1.5 list-disc space-y-0.5 pl-4">
-                        <li>
-                            <span className="text-chalk">Sync athletes to prod</span> — the roster, on demand
-                        </li>
-                        <li>
-                            <span className="text-chalk">Push results now</span> and the{" "}
-                            <span className="text-chalk">every N minutes</span> box — either endpoint stays editable
-                        </li>
-                        <li>
-                            <span className="text-chalk">Publish final standings</span> — the one push that writes
-                            prod&apos;s database instead of its cache
-                        </li>
-                    </ul>
-                </div>
-            </section>
+            </div>
         );
     }
 
-    const failing = (target.consecutive_failures ?? 0) > 0;
+    const save = (patch: Record<string, unknown>, note: string) =>
+        act("config", async () => {
+            await judgeApi(scoped("/admin/sync/config"), {
+                method: "PUT",
+                body: JSON.stringify(patch),
+            });
+            return note;
+        });
 
     return (
-        <>
-            <section className="mt-6 rounded-xl border border-smoke bg-coal p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                        <h2 className="text-sm font-bold uppercase tracking-wide">
-                            Connected to {target.remote_event_name || "prod"}
-                        </h2>
-                        {/* The endpoints themselves are below, editable. Here,
-                            only what identifies the connection — the two URLs
-                            used to be summarised on this line as a base URL and
-                            a brace expansion, which is exactly the shape that
-                            hid a results endpoint nothing was reading. */}
-                        <p className="mt-1 font-mono text-xs text-fog">
-                            {target.token_prefix}… · expires {when(target.token_expires_at)}
+        <div className="space-y-5">
+            {/* ---------------------------------------------- the two buttons */}
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h2 className="text-sm font-bold uppercase tracking-wide">Sync now</h2>
+                        <p className="mt-1 text-xs text-fog">
+                            Both directions also run on their own timers below. These are for when you want to know now.
                         </p>
-                        {editingUrl ? (
-                            <div className="mt-2 flex flex-wrap items-center gap-2">
-                                <input
-                                    value={urlDraft}
-                                    onChange={(e) => setUrlDraft(e.target.value)}
-                                    placeholder="https://app.example.com"
-                                    className="min-w-64 flex-1 rounded-lg border border-smoke bg-ink px-3 py-1.5 font-mono text-xs outline-none focus:border-hyred"
-                                />
-                                <button
-                                    onClick={async () => {
-                                        await configure({ baseUrl: urlDraft });
-                                        setEditingUrl(false);
-                                    }}
-                                    disabled={!!busy || !urlDraft.trim()}
-                                    className="rounded-lg bg-hyred px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
-                                >
-                                    Save
-                                </button>
-                                <button
-                                    onClick={() => setEditingUrl(false)}
-                                    className="text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        ) : (
-                            <button
-                                onClick={() => {
-                                    setUrlDraft(target.base_url);
-                                    setEditingUrl(true);
-                                }}
-                                className="mt-1 text-xs font-bold uppercase tracking-widest text-fog underline hover:text-chalk"
-                            >
-                                Change server address — moves both endpoints
-                            </button>
+                    </div>
+                    <Chip tone={target.enabled ? "live" : "default"}>
+                        {target.enabled ? "AUTOMATIC ON" : "PAUSED"}
+                    </Chip>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    {/* PULL */}
+                    <div className="rounded-lg border border-smoke bg-ink p-4">
+                        <div className="text-xs font-bold uppercase tracking-widest text-fog">Prod → this laptop</div>
+                        <p className="mt-1 text-xs text-fog">
+                            The event, its RaceResult wiring, declaration text, check-in window and certificate layouts.
+                        </p>
+                        <button
+                            disabled={Boolean(busy)}
+                            onClick={() =>
+                                void act("pull", async () => {
+                                    const out = await judgeApi<{ status: string; message: string }>(
+                                        scoped("/admin/sync/pull"),
+                                        { method: "POST", body: JSON.stringify({}) },
+                                    );
+                                    return out.message || "Configuration pulled";
+                                })
+                            }
+                            className="mt-3 w-full rounded-lg bg-hyred px-4 py-2.5 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                        >
+                            {busy === "pull" ? "Pulling…" : "Pull configuration"}
+                        </button>
+                        <div className="mt-2 text-xs text-fog">
+                            Last pull {ago(target.last_pull_at)}
+                            {target.last_pull_status ? ` · ${target.last_pull_status}` : ""}
+                            {target.config_pulled_at
+                                ? ` · last change applied ${ago(target.config_pulled_at)}`
+                                : " · nothing applied yet"}
+                        </div>
+                        {target.last_pull_error && (
+                            <p className="mt-1 text-xs text-hyred-ink">{target.last_pull_error}</p>
                         )}
                     </div>
-                    <div className="flex flex-wrap gap-2">
+
+                    {/* PUSH */}
+                    <div className="rounded-lg border border-smoke bg-ink p-4">
+                        <div className="text-xs font-bold uppercase tracking-widest text-fog">This laptop → prod</div>
+                        <p className="mt-1 text-xs text-fog">
+                            The standings, into prod&apos;s cache. Every result carries its own athlete, so there is
+                            nothing to send first.
+                        </p>
                         <button
-                            onClick={() => void check()}
-                            disabled={!!busy}
-                            className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
+                            disabled={Boolean(busy)}
+                            onClick={() =>
+                                void act("push", async () => {
+                                    const out = await judgeApi<{ rows: number; message: string }>(
+                                        scoped("/admin/sync/push"),
+                                        { method: "POST", body: JSON.stringify({ kind: "results" }) },
+                                    );
+                                    return out.message || `Pushed ${out.rows} result row(s)`;
+                                })
+                            }
+                            className="mt-3 w-full rounded-lg bg-hyred px-4 py-2.5 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
                         >
-                            {busy === "check" ? "Asking prod…" : "Test connection"}
+                            {busy === "push" ? "Pushing…" : "Push results"}
                         </button>
+                        <div className="mt-2 text-xs text-fog">
+                            Last push {ago(target.results_pushed_at)}
+                            {target.last_status ? ` · ${target.last_status}` : ""}
+                            {typeof target.results_pushed_rows === "number"
+                                ? ` · ${target.results_pushed_rows} row(s)`
+                                : ""}
+                        </div>
+                        {target.last_error && <p className="mt-1 text-xs text-hyred-ink">{target.last_error}</p>}
+                    </div>
+                </div>
+
+                {/* The end-of-day act, kept apart from the two above because it
+                    is the one that is not routine: it writes prod's TABLES, so
+                    the standings outlive the cache. */}
+                <div className="mt-4 rounded-lg border border-smoke bg-ink p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <div className="text-xs font-bold uppercase tracking-widest text-fog">
+                                Publish final standings
+                            </div>
+                            <p className="mt-1 text-xs text-fog">
+                                Everything above goes into prod&apos;s cache, which expires. This writes its database,
+                                so the history page, the scorecards and the certificates still work tomorrow. Do it once,
+                                at the end.
+                            </p>
+                            <div className="mt-1 text-xs text-fog">
+                                Last written {ago(target.results_stored_at)}
+                                {typeof target.results_stored_rows === "number"
+                                    ? ` · ${target.results_stored_rows} row(s)`
+                                    : ""}
+                            </div>
+                        </div>
                         <button
-                            onClick={() => void unbind()}
-                            disabled={!!busy}
-                            className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
+                            disabled={Boolean(busy)}
+                            onClick={() =>
+                                void act("final", async () => {
+                                    const out = await judgeApi<{ rows: number }>(scoped("/admin/sync/push"), {
+                                        method: "POST",
+                                        body: JSON.stringify({ kind: "results_final" }),
+                                    });
+                                    return `${out.rows} row(s) written to prod's database`;
+                                })
+                            }
+                            className="rounded-lg border border-hyred px-4 py-2 text-xs font-bold uppercase tracking-widest text-hyred-ink disabled:opacity-40"
                         >
-                            Disconnect
+                            {busy === "final" ? "Writing…" : "Publish final"}
                         </button>
                     </div>
                 </div>
 
-                {/* The line an operator actually looks at mid-event. */}
-                <div
-                    className={`mt-3 rounded-lg px-3 py-2 text-sm ${
-                        failing ? "bg-bad-soft text-bad" : "bg-good-soft text-good"
-                    }`}
-                >
-                    {failing
-                        ? `Last ${target.consecutive_failures} attempt(s) failed — ${target.last_error || "no reason given"}`
-                        : `Last attempt ${ago(target.last_attempt_at)} · ${target.last_status ?? "nothing sent yet"}`}
+                <ErrorNote msg={err} />
+                {msg && <p className="mt-3 text-sm text-fog">{msg}</p>}
+            </div>
+
+            {/* ------------------------------------------------ what we hold */}
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">On this laptop</h2>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Stat label="Athletes" value={String(state.counts?.athletes ?? 0)} />
+                    <Stat label="Results" value={String(state.counts?.results ?? 0)} hint="What a push would send" />
+                </div>
+            </div>
+
+            {/* ------------------------------------------------- the schedule */}
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Automatic sync</h2>
+                <p className="mt-1 text-xs text-fog">
+                    Two intervals, because the two directions answer to different things: standings change constantly
+                    while a race is scored, configuration changes when an admin edits it. Set either to 0 for manual
+                    only.
+                </p>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                    <IntervalField
+                        title="Pull configuration"
+                        value={target.pull_interval_minutes}
+                        suggestions={state.pullIntervals}
+                        disabled={busy === "config"}
+                        onSave={(v) => void save({ pullIntervalMinutes: v }, `Pull interval: ${intervalLabel(v)}`)}
+                    />
+                    <IntervalField
+                        title="Push results"
+                        value={target.interval_minutes}
+                        suggestions={state.pushIntervals}
+                        disabled={busy === "config"}
+                        onSave={(v) => void save({ intervalMinutes: v }, `Push interval: ${intervalLabel(v)}`)}
+                    />
                 </div>
 
-                {/* WHERE THE TWO PUSHES ACTUALLY GO. "Where is it pushing?" is
-                    asked whenever a push fails, and until now the answer was a
-                    base URL and a brace expansion that the operator had to
-                    assemble in their head — and which was, in any case, what
-                    this code had assembled rather than what prod issued. Both
-                    are stored as pasted and either can be corrected here
-                    without a Disconnect. */}
-                <div className="mt-3 grid gap-2 lg:grid-cols-2">
-                    <EditableEndpoint
-                        title="Participants endpoint"
-                        destination="The start list, into prod's database"
-                        url={target.athletes_url}
-                        busy={!!busy}
-                        onSave={(next) => configure({ athletesUrl: next })}
+                <div className="mt-4 space-y-3">
+                    <Toggle
+                        checked={target.enabled}
+                        disabled={busy === "config"}
+                        onChange={(v) =>
+                            void save({ enabled: v }, v ? "Automatic sync resumed" : "Automatic sync paused")
+                        }
+                        title="Sync automatically"
+                        hint="Off pauses both timers without forgetting where prod is."
                     />
-                    <EditableEndpoint
-                        title="Results endpoint"
-                        destination="The standings, into prod's cache, on the interval below"
-                        url={target.results_url}
-                        busy={!!busy}
-                        onSave={(next) => configure({ resultsUrl: next })}
+                    <Toggle
+                        checked={target.auto_import_results}
+                        disabled={busy === "config"}
+                        onChange={(v) =>
+                            void save(
+                                { autoImportResults: v },
+                                v
+                                    ? "Results will be re-imported from RaceResult before each scheduled push"
+                                    : "Scheduled pushes will send the standings already stored here",
+                            )
+                        }
+                        title="Re-import from RaceResult before each push"
+                        hint="On during a race, off after one: it keeps the stored standings current, which is the wrong thing once they are final."
                     />
                 </div>
-            </section>
+            </div>
 
-            {/* ------------------------------------------------------- roster */}
-            <section className="mt-4 grid gap-4 lg:grid-cols-2">
-                <div className="rounded-xl border border-smoke bg-coal p-4">
-                    <h3 className="text-sm font-bold uppercase tracking-wide">Athletes</h3>
-                    <p className="mt-1 text-xs text-fog">
-                        {state.counts.athletes} on this server&apos;s start list · last pushed{" "}
-                        {ago(target.athletes_pushed_at)}
-                        {target.athletes_pushed_rows != null ? ` (${target.athletes_pushed_rows} rows)` : ""}
-                    </p>
-                    <p className="mt-2 text-xs text-fog">
-                        Sent whole, and prod drops whoever this push did not bring — so a withdrawal here is a
-                        withdrawal there. Push it after every roster import; results cannot land for athletes prod has
-                        never heard of.
-                    </p>
+            {/* ------------------------------------------------- where it goes */}
+            <div className="rounded-xl border border-smoke bg-coal p-5">
+                <h2 className="text-sm font-bold uppercase tracking-wide">Where is it pointed?</h2>
+                <p className="mt-1 text-xs text-fog">
+                    Paired to <code className="text-chalk">{target.base_url}</code> with credential{" "}
+                    <code className="text-chalk">{target.token_prefix}…</code>
+                    {target.token_expires_at ? `, expiring ${when(target.token_expires_at)}` : ""}.
+                </p>
+
+                <div className="mt-4 space-y-3">
+                    <EditableEndpoint
+                        title="Server address"
+                        hint="Changing this rewrites the origin of both endpoints below and keeps their paths — for when prod moves, or the venue reaches it by another route."
+                        value={target.base_url}
+                        disabled={busy === "config"}
+                        onSave={(v) => void save({ baseUrl: v }, "Server address updated")}
+                    />
+                    <EditableEndpoint
+                        title="Configuration endpoint (GET)"
+                        hint="What this laptop reads prod's setup from."
+                        value={target.pull_url}
+                        disabled={busy === "config"}
+                        onSave={(v) => void save({ pullUrl: v }, "Configuration endpoint saved")}
+                    />
+                    <EditableEndpoint
+                        title="Results endpoint (POST)"
+                        hint="What this laptop publishes the standings to."
+                        value={target.push_url}
+                        disabled={busy === "config"}
+                        onSave={(v) => void save({ pushUrl: v }, "Results endpoint saved")}
+                    />
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-3">
                     <button
-                        onClick={() => void push("athletes")}
-                        disabled={!!busy}
-                        className="mt-3 w-full rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
+                        disabled={Boolean(busy)}
+                        onClick={() =>
+                            void act("check", async () => {
+                                const out = await judgeApi<{ remote: { event: { name: string } } }>(
+                                    scoped("/admin/sync/check"),
+                                    { method: "POST", body: JSON.stringify({}) },
+                                );
+                                return `Prod answered for "${out.remote?.event?.name ?? "?"}"`;
+                            })
+                        }
+                        className="rounded-lg border border-smoke px-4 py-2 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk disabled:opacity-40"
                     >
-                        {busy === "push:athletes" ? "Pushing…" : "Sync athletes to prod"}
+                        {busy === "check" ? "Checking…" : "Test connection"}
+                    </button>
+                    <button
+                        disabled={Boolean(busy)}
+                        onClick={() =>
+                            void act("unpair", async () => {
+                                await judgeApi(scoped("/admin/sync/pair"), { method: "DELETE" });
+                                return "Disconnected. Nothing already published on prod was withdrawn.";
+                            })
+                        }
+                        className="rounded-lg border border-smoke px-4 py-2 text-xs font-bold uppercase tracking-widest text-fog hover:text-hyred-ink disabled:opacity-40"
+                    >
+                        Disconnect
                     </button>
                 </div>
+            </div>
+        </div>
+    );
+}
 
-                <div className="rounded-xl border border-smoke bg-coal p-4">
-                    <h3 className="text-sm font-bold uppercase tracking-wide">Results → prod&apos;s cache</h3>
-                    <p className="mt-1 text-xs text-fog">
-                        {state.counts.results} on this server · last pushed {ago(target.results_pushed_at)}
-                        {target.results_pushed_rows != null ? ` (${target.results_pushed_rows} rows)` : ""}
-                    </p>
-                    <p className="mt-2 text-xs text-fog">
-                        Goes into prod&apos;s Valkey, under the key its live-results mode already reads. Fast, and
-                        provisional by design — it expires and every push replaces it.
-                    </p>
+/* An interval box with quick picks beside it.
+ *
+ * The picks are SUGGESTIONS, not the permitted set: any whole number of minutes
+ * up to a day is accepted. An enumerated dropdown answered "every 7 minutes"
+ * with a constraint name, which is a real thing a venue asks for. */
+function IntervalField({
+    title,
+    value,
+    suggestions,
+    disabled,
+    onSave,
+}: {
+    title: string;
+    value: number;
+    suggestions: number[];
+    disabled: boolean;
+    onSave: (v: number) => void;
+}) {
+    const [draft, setDraft] = useState(String(value));
+    useEffect(() => setDraft(String(value)), [value]);
+    const parsed = Number(draft);
+    const valid = Number.isInteger(parsed) && parsed >= 0 && parsed <= 1440;
 
-                    <div className="mt-3">
-                        <IntervalField
-                            minutes={minutes}
-                            onChange={setMinutes}
-                            onCommit={(value) => {
-                                if (value !== target.interval_minutes) void configure({ intervalMinutes: value });
-                            }}
-                            presets={state.intervals}
-                            bounds={state.intervalBounds}
-                            disabled={!!busy}
-                            hint={`Currently ${intervalLabel(target.interval_minutes).toLowerCase()}. The timer runs on this server, not in this browser — closing the console does not stop it. A push that would send standings prod already has is skipped.`}
-                        />
-                    </div>
-
-                    {/* Without this the timer re-sends the same stored snapshot
-                        all afternoon: the Results screen's Import is the only
-                        thing that writes this server's standings. Off by
-                        default, because keeping stored results current is right
-                        during a race and wrong after one. */}
-                    <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-lg border border-smoke p-3 text-xs">
-                        <input
-                            type="checkbox"
-                            checked={target.auto_import_results}
-                            disabled={!!busy}
-                            onChange={(e) => void configure({ autoImportResults: e.target.checked })}
-                            className="mt-0.5 accent-hyred"
-                        />
-                        <span>
-                            <span className="font-bold uppercase tracking-widest text-fog">
-                                Re-import from RaceResult first
-                            </span>
-                            <span className="mt-1 block text-fog">
-                                Each scheduled push pulls the standings into this server before sending them. Leave it
-                                off and the timer only sends what you last imported by hand on the Results screen. If
-                                RaceResult cannot be reached, the push still sends what is stored here and says so.
-                            </span>
-                        </span>
-                    </label>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                            onClick={() => void push("results")}
-                            disabled={!!busy}
-                            className="flex-1 rounded-lg bg-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-onfill disabled:opacity-40"
-                        >
-                            {busy === "push:results" ? "Pushing…" : "Push results now"}
-                        </button>
-                        <button
-                            onClick={() => void configure({ enabled: !target.enabled })}
-                            disabled={!!busy}
-                            className="rounded-lg border border-smoke px-3 py-2 text-xs font-bold uppercase tracking-wide text-fog hover:text-chalk disabled:opacity-40"
-                        >
-                            {target.enabled ? "Pause" : "Resume"}
-                        </button>
-                    </div>
-                </div>
-            </section>
-
-            {/* The end of the day. A cache is allowed to lose things; this is
-                the act that makes the standings answerable tomorrow. */}
-            <section className="mt-4 rounded-xl border border-smoke bg-coal p-4">
-                <h3 className="text-sm font-bold uppercase tracking-wide">Final standings → prod&apos;s database</h3>
-                <p className="mt-1 text-xs text-fog">
-                    {target.results_stored_at
-                        ? `Last written ${ago(target.results_stored_at)}${
-                              target.results_stored_rows != null ? ` (${target.results_stored_rows} rows)` : ""
-                          }`
-                        : "Never written — nothing published here survives prod's cache expiring"}
-                </p>
-                <p className="mt-2 max-w-prose text-xs text-fog">
-                    Everything above goes into prod&apos;s Valkey, which expires twelve hours after the last push. Press
-                    this once the race is scored and the standings are written to prod&apos;s tables instead — which is
-                    what the history page, the scorecard and the certificates read. Prod then serves them by switching
-                    its Results mode from <span className="font-bold text-chalk">live</span> to{" "}
-                    <span className="font-bold text-chalk">stored</span>.
-                </p>
+    return (
+        <div className="rounded-lg border border-smoke bg-ink p-3">
+            <div className="text-xs font-bold uppercase tracking-widest text-fog">{title}</div>
+            <div className="mt-2 flex items-center gap-2">
+                <input
+                    type="number"
+                    min={0}
+                    max={1440}
+                    value={draft}
+                    disabled={disabled}
+                    onChange={(e) => setDraft(e.target.value)}
+                    className="w-24 rounded-lg border border-smoke bg-coal px-3 py-2 text-sm outline-none focus:border-hyred"
+                />
+                <span className="text-xs text-fog">minutes</span>
                 <button
-                    onClick={() => void push("results_final")}
-                    disabled={!!busy}
-                    className="mt-3 rounded-lg border border-hyred px-4 py-2 text-sm font-bold uppercase tracking-wide text-hyred-ink disabled:opacity-40"
+                    disabled={disabled || !valid || parsed === value}
+                    onClick={() => onSave(parsed)}
+                    className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk disabled:opacity-30"
                 >
-                    {busy === "push:results_final" ? "Writing to prod…" : "Publish final standings to prod"}
+                    Save
                 </button>
-            </section>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1">
+                {suggestions.map((m) => (
+                    <button
+                        key={m}
+                        disabled={disabled}
+                        onClick={() => {
+                            setDraft(String(m));
+                            onSave(m);
+                        }}
+                        className={`rounded border px-2 py-1 text-xs ${
+                            m === value ? "border-hyred text-chalk" : "border-smoke text-fog hover:text-chalk"
+                        }`}
+                    >
+                        {m === 0 ? "Manual" : m}
+                    </button>
+                ))}
+            </div>
+            <p className="mt-2 text-xs text-fog">{intervalLabel(value)}</p>
+        </div>
+    );
+}
 
-            <RunHistory runs={state.runs} />
-        </>
+/* A stored URL, editable in place.
+ *
+ * The endpoints are stored WHOLE rather than rebuilt from an origin and an
+ * event id, which is what makes editing one meaningful — see migration 093.
+ * Before that the sender invented the path, the invented one happened to match,
+ * and the day it stopped matching there was no screen on which anybody could
+ * see it, let alone change it. */
+function EditableEndpoint({
+    title,
+    hint,
+    value,
+    disabled,
+    onSave,
+}: {
+    title: string;
+    hint: string;
+    value: string;
+    disabled: boolean;
+    onSave: (v: string) => void;
+}) {
+    const [draft, setDraft] = useState(value);
+    useEffect(() => setDraft(value), [value]);
+    const dirty = draft.trim() !== value.trim();
+
+    return (
+        <div className="rounded-lg border border-smoke bg-ink p-3">
+            <div className="text-xs font-bold uppercase tracking-widest text-fog">{title}</div>
+            <p className="mt-0.5 text-xs text-fog">{hint}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+                <input
+                    value={draft}
+                    disabled={disabled}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                    className="min-w-0 flex-1 rounded-lg border border-smoke bg-coal px-3 py-2 font-mono text-xs outline-none focus:border-hyred"
+                />
+                <button
+                    disabled={disabled || !dirty || !draft.trim()}
+                    onClick={() => onSave(draft.trim())}
+                    className="rounded-lg border border-smoke px-3 py-1.5 text-xs font-bold uppercase tracking-widest text-fog hover:text-chalk disabled:opacity-30"
+                >
+                    Save
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function Toggle({
+    checked,
+    disabled,
+    onChange,
+    title,
+    hint,
+}: {
+    checked: boolean;
+    disabled: boolean;
+    onChange: (v: boolean) => void;
+    title: string;
+    hint: string;
+}) {
+    return (
+        <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-smoke bg-ink p-3">
+            <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled}
+                onChange={(e) => onChange(e.target.checked)}
+                className="mt-0.5 accent-hyred"
+            />
+            <span className="min-w-0">
+                <span className="block text-sm font-bold">{title}</span>
+                <span className="mt-0.5 block text-xs text-fog">{hint}</span>
+            </span>
+        </label>
     );
 }
 
 function RunHistory({ runs }: { runs: Run[] }) {
-    const tone = useMemo(
-        () => ({ ok: "text-good", error: "text-bad", skipped: "text-fog" }) as Record<string, string>,
-        [],
-    );
-
+    if (!runs?.length) return null;
     return (
-        <section className="mt-6">
-            <h2 className="text-sm font-bold uppercase tracking-wide">Recent pushes</h2>
+        <div className="rounded-xl border border-smoke bg-coal p-5">
+            <h2 className="text-sm font-bold uppercase tracking-wide">Recent activity</h2>
             <p className="mt-1 text-xs text-fog">
-                Kept on this server. The question this answers is asked an hour into an event, with somebody saying the
-                public site is behind.
+                Both directions, newest first. This is the answer to &ldquo;when did we last actually reach prod, and
+                what did it say&rdquo; — asked an hour into an event, with somebody saying the site is behind.
             </p>
-            {!runs?.length ? (
-                <Empty title="Nothing pushed yet" hint="Sync the athletes first, then the results follow" />
-            ) : (
-                <div className="mt-3 overflow-x-auto rounded-xl border border-smoke">
-                    <table className="w-full min-w-[40rem] text-left text-sm">
-                        <thead className="bg-coal text-xs uppercase tracking-widest text-fog">
-                            <tr>
-                                <th className="px-3 py-2">When</th>
-                                <th className="px-3 py-2">What</th>
-                                <th className="px-3 py-2">Result</th>
-                                <th className="px-3 py-2">Rows</th>
-                                <th className="px-3 py-2">Took</th>
-                                <th className="px-3 py-2">Note</th>
+            <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[640px] text-sm">
+                    <thead>
+                        <tr className="border-b border-smoke text-xs uppercase tracking-widest text-fog">
+                            <th className="px-2 py-2 text-left">When</th>
+                            <th className="px-2 py-2 text-left">What</th>
+                            <th className="px-2 py-2 text-left">Trigger</th>
+                            <th className="px-2 py-2 text-left">Status</th>
+                            <th className="px-2 py-2 text-right">Rows</th>
+                            <th className="px-2 py-2 text-left">Note</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {runs.map((r) => (
+                            <tr key={r.id} className="border-b border-smoke/50">
+                                <td className="whitespace-nowrap px-2 py-2 text-fog">{ago(r.started_at)}</td>
+                                <td className="px-2 py-2">{RUN_LABEL[r.kind] ?? r.kind}</td>
+                                <td className="px-2 py-2 text-fog">{r.trigger_source}</td>
+                                <td className="px-2 py-2">
+                                    <Chip
+                                        tone={r.status === "ok" ? "ok" : r.status === "error" ? "live" : "default"}
+                                    >
+                                        {r.status}
+                                    </Chip>
+                                </td>
+                                <td className="px-2 py-2 text-right tabular-nums">{r.rows_sent || "—"}</td>
+                                <td className="px-2 py-2 text-fog">{r.message || "—"}</td>
                             </tr>
-                        </thead>
-                        <tbody>
-                            {runs.map((r) => (
-                                <tr key={r.id} className="border-t border-smoke">
-                                    <td className="whitespace-nowrap px-3 py-2 text-fog">{ago(r.started_at)}</td>
-                                    <td className="px-3 py-2">
-                                        {r.kind} <span className="text-xs text-fog">· {r.trigger_source}</span>
-                                    </td>
-                                    <td className={`px-3 py-2 font-bold ${tone[r.status] ?? ""}`}>{r.status}</td>
-                                    <td className="px-3 py-2 text-fog">
-                                        {r.rows_sent}
-                                        {r.chunks ? <span className="text-xs"> / {r.chunks} req</span> : null}
-                                    </td>
-                                    <td className="px-3 py-2 text-fog">
-                                        {r.duration_ms != null ? `${r.duration_ms}ms` : "—"}
-                                    </td>
-                                    <td className="px-3 py-2 text-xs text-fog">{r.message || "—"}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-        </section>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
     );
 }

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { judgeApi, fmtDate, appPath } from "../../lib/api";
+import { judgeApi, fmtEventDays, appPath } from "../../lib/api";
 import { Spinner, Chip } from "../../lib/ui";
 import { useFieldSession } from "../../lib/field-session";
 
@@ -91,7 +91,9 @@ export default function AdminDashboard() {
                 {stat("Total Events", data.total)}
                 {stat("Live", data.live, data.live > 0 ? "live" : undefined)}
                 {stat("Ready", data.ready)}
-                {stat("Closed", data.closed, "ok")}
+                {/* 'closed' in the column, "Completed" on every screen — the
+                    same wording as the Events list. See STATUS_LABEL there. */}
+                {stat("Completed", data.closed, "ok")}
             </div>
 
             {overview && (
@@ -162,11 +164,15 @@ export default function AdminDashboard() {
                         <div>
                             <p className="font-semibold">{e.name}</p>
                             <p className="text-xs text-fog">
-                                {e.event_date ? fmtDate(e.event_date) : "No date set"} · {e.venue || "Venue TBD"}
+                                {/* The span, not Day 1. A two-day edition
+                                    named only by its first day reads here as an
+                                    event that finished that evening. */}
+                                {fmtEventDays(e.event_date, e.event_end_date, { empty: "No date set" })} ·{" "}
+                                {e.venue || "Venue TBD"}
                             </p>
                         </div>
                         <Chip tone={e.status === "live" ? "live" : e.status === "closed" ? "ok" : "default"}>
-                            {e.status}
+                            {e.status === "closed" ? "completed" : e.status}
                         </Chip>
                     </Link>
                 ))}

@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { HjudgeDbService } from '../hjudge-db.service';
@@ -11,6 +16,10 @@ import {
   HJUDGE_STAGE_ROLES,
 } from '../hjudge-session.util';
 import { HjudgeRaceResultService } from './hjudge-raceresult.service';
+import { HjudgeResultsService } from './hjudge-results.service';
+import { HjudgeCacheService } from '../hjudge-cache.service';
+import { normaliseEndDate } from '../hjudge-event-dates.util';
+import { hjudgeSyncConfig } from '../hjudge-sync.config';
 import {
   resolveUpdateField,
   updateMappingProblems,
@@ -18,9 +27,13 @@ import {
 
 @Injectable()
 export class HjudgeAdminService {
+  private readonly logger = new Logger(HjudgeAdminService.name);
+
   constructor(
     private readonly db: HjudgeDbService,
     private readonly raceResult: HjudgeRaceResultService,
+    private readonly results: HjudgeResultsService,
+    private readonly cache: HjudgeCacheService,
   ) {}
 
   /**
@@ -123,15 +136,30 @@ export class HjudgeAdminService {
       // `results_mode` rides along so the list can show — and change — what
       // each event is publishing without a call per row. It is read here and
       // written only through PUT /admin/results/mode, which owns the column.
+      // The two dates leave here as plain `YYYY-MM-DD` strings, for the same
+      // reason the public route does it (see HjudgePublicController.events):
+      // node-pg turns a `date` into a JS Date at LOCAL midnight, JSON writes
+      // that as a UTC instant, and every reader in India is shown the day
+      // before the event. `to_char` keeps a calendar day a calendar day.
       `SELECT id, name, COALESCE(venue,'') AS venue, starts_at, ends_at,
-              timezone, status, is_active, event_date,
-              results_mode, results_stored_at,
+              timezone, status, is_active,
+              to_char(event_date, 'YYYY-MM-DD') AS event_date,
+              to_char(event_end_date, 'YYYY-MM-DD') AS event_end_date,
+              results_mode, results_stored_at, delivery_mode,
               platform_event_id AS "platformEventId",
               created_at, updated_at
        FROM events
        ORDER BY is_active DESC, starts_at DESC NULLS LAST, created_at DESC`,
     );
-    return { events: result.rows };
+    // `role` rides along because the Events screen shows a different primary
+    // action on each deployment — prod CREATES an event, a venue laptop PAIRS
+    // with one that already exists on prod — and the alternative is a second
+    // round trip whose only purpose is to discover which button to draw. It is
+    // a deployment constant, not a per-request fact.
+    return {
+      events: result.rows,
+      role: hjudgeSyncConfig.nodeRole,
+    };
   }
 
   /**
@@ -154,13 +182,22 @@ export class HjudgeAdminService {
       endsAt?: string;
       timezone?: string;
       eventDate?: string;
+      eventEndDate?: string;
+      deliveryMode?: string;
     },
     user: HjudgeUser,
   ) {
+    // Anything but a deliberate 'offline' is online. The column has a CHECK
+    // that would reject a typo, but rejecting it HERE means the operator gets
+    // "delivery mode must be…" rather than a constraint name, and a form that
+    // simply does not send the field keeps working.
+    const deliveryMode = data.deliveryMode === 'offline' ? 'offline' : 'online';
+
     const created = await this.db.q<{ id: string }>(
       `INSERT INTO events(
-         name, venue, starts_at, ends_at, timezone, event_date, status)
-       VALUES($1, nullif($2,''), $3, $4, $5, $6, 'draft')
+         name, venue, starts_at, ends_at, timezone,
+         event_date, event_end_date, status, delivery_mode)
+       VALUES($1, nullif($2,''), $3, $4, $5, $6::date, $7::date, 'draft', $8)
        RETURNING id`,
       [
         data.name,
@@ -170,12 +207,18 @@ export class HjudgeAdminService {
         data.timezone ?? 'Asia/Kolkata',
         // The check-in window needs a calendar day to anchor a timeslot to.
         data.eventDate || null,
+        // Day 2 of a two-day edition, and NULL for a one-day one — including
+        // when the form sends back the same day twice, because "ends on the
+        // day it starts" is a single-day event and every reader is written to
+        // treat NULL as exactly that.
+        normaliseEndDate(data.eventDate, data.eventEndDate),
+        deliveryMode,
       ],
     );
     const id = created.rows[0].id;
 
     await this.audit(user.id, id, 'event.create', 'event', id, data);
-    return { id };
+    return { id, deliveryMode };
   }
 
   async updateEvent(
@@ -187,6 +230,8 @@ export class HjudgeAdminService {
       activate?: boolean;
       startsAt?: string;
       endsAt?: string;
+      eventDate?: string | null;
+      eventEndDate?: string | null;
       resultsStatus?: string;
     },
     user: HjudgeUser,
@@ -197,20 +242,32 @@ export class HjudgeAdminService {
         // first: hyfit_events_one_active permits a single active row, and the
         // deactivate must land before the activate or the unique index rejects
         // the pair.
-        await client.query(`UPDATE events SET is_active = false WHERE is_active`);
+        await client.query(
+          `UPDATE events SET is_active = false WHERE is_active`,
+        );
         await client.query(
           `UPDATE events SET is_active = true, updated_at = now() WHERE id = $1`,
           [data.id],
         );
       } else {
+        // The two calendar days are the one pair here that must be settable
+        // back to nothing: every other field on this statement is COALESCEd,
+        // so an omitted key keeps what is stored, but an organiser who put a
+        // second day on the wrong event has to be able to take it off again.
+        // `$7 = true` is the "the caller mentioned these" flag — without it,
+        // clearing and not-mentioning are the same request.
+        const datesTouched =
+          data.eventDate !== undefined || data.eventEndDate !== undefined;
         await client.query(
           `UPDATE events SET
-             name       = COALESCE($2, name),
-             venue      = COALESCE(nullif($3,''), venue),
-             status     = COALESCE($4, status),
-             starts_at  = COALESCE($5::timestamptz, starts_at),
-             ends_at    = COALESCE($6::timestamptz, ends_at),
-             updated_at = now()
+             name           = COALESCE($2, name),
+             venue          = COALESCE(nullif($3,''), venue),
+             status         = COALESCE($4, status),
+             starts_at      = COALESCE($5::timestamptz, starts_at),
+             ends_at        = COALESCE($6::timestamptz, ends_at),
+             event_date     = CASE WHEN $7 THEN $8::date ELSE event_date END,
+             event_end_date = CASE WHEN $7 THEN $9::date ELSE event_end_date END,
+             updated_at     = now()
            WHERE id = $1`,
           [
             data.id,
@@ -219,6 +276,14 @@ export class HjudgeAdminService {
             data.status || null,
             data.startsAt || null,
             data.endsAt || null,
+            datesTouched,
+            data.eventDate || null,
+            // A second day with no first day would fail
+            // hyfit_v2_events_date_span_check, and rightly: the span it
+            // describes has no beginning. Dropped here so the operator gets
+            // "Day 1 is required" from the controller rather than a constraint
+            // name from Postgres.
+            data.eventDate ? normaliseEndDate(data.eventDate, data.eventEndDate) : null,
           ],
         );
         // resultsStatus is deliberately not handled here. Publishing results is
@@ -239,6 +304,181 @@ export class HjudgeAdminService {
     return { ok: true };
   }
 
+  /**
+   * What deleting this event takes with it, counted before anything is removed.
+   *
+   * Read by the console so the confirmation says the actual numbers — "3 214
+   * athletes, 3 190 results, 6 staff accounts" — rather than a generic warning.
+   * An operator who is about to destroy a race day's work should be told what
+   * that is, in rows, by the system that knows.
+   *
+   * Tables are counted only if they exist. `backend/sql` is applied by hand and
+   * a deployment can legitimately be a few migrations behind (an offline venue
+   * node most of all), and a preflight that 500s because one table is missing
+   * would block the delete on a table that has nothing in it.
+   */
+  async eventDeleteImpact(eventId: string) {
+    const event = await this.eventForDelete(eventId);
+
+    const { rows: present } = await this.db.q<{ table_name: string }>(
+      `SELECT t.table_name FROM unnest($1::text[]) AS t(table_name)
+        WHERE to_regclass('hyfit_v2.' || t.table_name) IS NOT NULL`,
+      [EVENT_OWNED_TABLES.map((t) => t.table)],
+    );
+    const live = EVENT_OWNED_TABLES.filter((t) =>
+      present.some((p) => p.table_name === t.table),
+    );
+
+    // The table names are this file's own constants, never anything a caller
+    // sent — the only interpolation into SQL here, and deliberately closed.
+    const counts = live.length
+      ? (
+          await this.db.q<Record<string, number>>(
+            `SELECT ${live
+              .map(
+                (t) =>
+                  `(SELECT count(*)::int FROM ${t.table} WHERE event_id = $1) AS "${t.label}"`,
+              )
+              .join(', ')}`,
+            [eventId],
+          )
+        ).rows[0]
+      : {};
+
+    // Named, not just counted. A staff account is a person who will try to sign
+    // in on race morning and find themselves gone, and "6 accounts" does not
+    // tell the operator whether one of them is the check-in lead.
+    const { rows: staff } = await this.db.q<{ name: string; role: string }>(
+      `SELECT name, role FROM users WHERE event_id = $1
+        ORDER BY role, name LIMIT 10`,
+      [eventId],
+    );
+
+    return { event, counts, staff };
+  }
+
+  /**
+   * Delete an event and everything that belongs to it.
+   *
+   * PERMANENT, and there is no undo: the roster, the results, the certificate
+   * designs, the RaceResult wiring, the sync credentials and the staff accounts
+   * hired for this event all go with it. Most of that happens through
+   * `ON DELETE CASCADE` in the schema rather than in statements here — the
+   * database already knows what belongs to an event, and a hand-written list of
+   * DELETEs would be a second answer to that question, drifting out of date
+   * with every migration that adds a table.
+   *
+   * THREE THINGS ARE REFUSED rather than handled, because each is somebody
+   * about to lose something they did not mean to:
+   *
+   *   - the ACTIVE event, which is what the tablets and counters are running.
+   *     Standing it down is one press on this same screen, and doing it as a
+   *     side effect of a delete would take a race off the air mid-morning.
+   *   - a name that does not match. The confirmation is typed, not clicked:
+   *     the rows are not recoverable and two adjacent editions of the same
+   *     event look identical in a list.
+   *   - deleting the event YOUR OWN account is bound to, which would delete you
+   *     mid-request — `users.event_id` cascades — and leave the audit entry
+   *     with no author.
+   *
+   * WHAT IS NOT TOUCHED: `platform_event_id`. It points at the athlete
+   * platform's own row for the same race, in the `hyfit` schema this deployment
+   * dropped — there is nothing on the other end to delete, and reaching across
+   * a schema boundary from here is the coupling the cutover removed. If that
+   * listing ever comes back, deleting its row becomes its own screen's job.
+   */
+  async deleteEvent(eventId: string, user: HjudgeUser, confirmName: string) {
+    const { event, counts, staff } = await this.eventDeleteImpact(eventId);
+
+    if (event.is_active)
+      throw new BadRequestException(
+        `"${event.name}" is the active event — the field apps are pointed at it. Make another event active first, then delete this one.`,
+      );
+
+    if (!namesMatch(confirmName, event.name))
+      throw new BadRequestException(
+        `Type the event's name exactly — "${event.name}" — to confirm the deletion.`,
+      );
+
+    const { rows: self } = await this.db.q<{ id: string }>(
+      'SELECT id FROM users WHERE id = $1 AND event_id = $2',
+      [user.id, eventId],
+    );
+    if (self.length)
+      throw new BadRequestException(
+        'Your own account is assigned to this event, so deleting it would delete you. Reassign yourself first.',
+      );
+
+    // The standings cache is keyed by the event's NAME, not its id, so it is
+    // not covered by invalidateEvent below and cannot be cleared once the row
+    // is gone. Best effort: a cache that cannot be reached is not a reason to
+    // refuse the delete, and the public read resolves the event first and 404s
+    // for a row that no longer exists.
+    await this.results.discard(eventId).catch((e: Error) => {
+      this.logger.warn(
+        `Could not clear the standings cache for ${eventId} before deleting it: ${e.message}`,
+      );
+    });
+
+    await this.db.tx(async (client) => {
+      // audit_events.event_id has no ON DELETE action (080), so these rows
+      // would block the delete outright. They are the history OF this event and
+      // go with it; what survives is the one entry written below.
+      await client.query('DELETE FROM audit_events WHERE event_id = $1', [
+        eventId,
+      ]);
+      const deleted = await client.query('DELETE FROM events WHERE id = $1', [
+        eventId,
+      ]);
+      if (!deleted.rowCount) throw new NotFoundException('Event not found');
+    });
+
+    await this.cache.invalidateEvent(eventId);
+
+    // Written after the delete and with a NULL event_id — the FK would refuse
+    // to point at a row that is gone. This entry is the only record that the
+    // event ever existed, so it carries its name and everything that went with
+    // it rather than just its id.
+    await this.audit(user.id, null, 'event.delete', 'event', eventId, {
+      name: event.name,
+      venue: event.venue,
+      event_date: event.event_date,
+      status: event.status,
+      removed: counts,
+      staff: staff.map((s) => `${s.name} (${s.role})`),
+    });
+
+    this.logger.warn(
+      `Event deleted: "${event.name}" (${eventId}) by ${user.id} — ${Object.entries(
+        counts,
+      )
+        .map(([k, v]) => `${v} ${k}`)
+        .join(', ')}`,
+    );
+
+    return { deleted: true, name: event.name, removed: counts };
+  }
+
+  /** The event, or a 404 — the one row every delete path starts from. */
+  private async eventForDelete(eventId: string) {
+    const { rows } = await this.db.q<{
+      id: string;
+      name: string;
+      venue: string | null;
+      status: string;
+      is_active: boolean;
+      event_date: string | null;
+      results_mode: string;
+    }>(
+      `SELECT id, name, venue, status, is_active,
+              to_char(event_date, 'YYYY-MM-DD') AS event_date, results_mode
+         FROM events WHERE id = $1`,
+      [eventId],
+    );
+    if (!rows[0]) throw new NotFoundException('Event not found');
+    return rows[0];
+  }
+
   // `users` resolves to hyfit_v2.users through the pool's search_path (080).
   //
   // `staff_id IS NOT NULL` filters out console operators, who reach the field
@@ -252,8 +492,7 @@ export class HjudgeAdminService {
   async listUsers(eventId: string) {
     const result = await this.db.q(
       `SELECT id, staff_id AS "staffId", name, role, event_id AS "eventId",
-        station_number AS "stationNumber",
-        checkin_stage AS "checkinStage",
+        station_number AS "stationNumber", checkin_stage AS "checkinStage",
         enabled, created_at AS "createdAt"
        FROM users
        WHERE staff_id IS NOT NULL AND (event_id = $1 OR event_id IS NULL)
@@ -263,15 +502,21 @@ export class HjudgeAdminService {
     return { users: result.rows };
   }
 
-  // Which shift a person is rostered onto, decided the same way for a create
-  // and for an edit so the two cannot disagree.
-  //
-  // The rules are the database's, enforced here so a slip comes back as a
-  // sentence rather than as a constraint violation: only the two stage names
-  // are stages, and only a volunteer or a standing-in admin can hold one. A
-  // check-in volunteer with nothing said about their stage takes Stage 1 —
-  // what the 081 backfill gave every volunteer who predates the column, and
-  // what the CSV preview promises for a blank cell.
+  /**
+   * The shift a staff account is rostered onto, validated once.
+   *
+   * THREE RULES IN ONE PLACE, because they were previously in three and
+   * disagreed. A check-in volunteer with no stage named defaults to Stage 1 —
+   * an account that can sign in and do nothing is worse than one on the wrong
+   * desk. A stage that is not one of the two is refused by name rather than by
+   * the `hyfit_v2_users_checkin_stage_check` constraint. And a stage on a
+   * JUDGE is refused outright: it files a judging account under a check-in
+   * shift, which is a data-entry slip that the Team screen then renders as a
+   * volunteer who never appears at any counter.
+   *
+   * The permitted roles are the same set `hyfit_v2_users_stage_role` allows —
+   * an admin standing in at a desk is the Help Desk override.
+   */
   private resolveCheckinStage(
     stage: string | null | undefined,
     role: string | null | undefined,
@@ -306,6 +551,9 @@ export class HjudgeAdminService {
   ) {
     const staffId = data.staffId.trim().toUpperCase();
     const name = data.name ? data.name.trim() : staffId;
+    // A counter volunteer with no stage named can do nothing at all, so hiring
+    // one defaults to Stage 1 rather than producing an account that signs in
+    // and then reports that an admin has not finished setting it up.
     const checkinStage = this.resolveCheckinStage(data.checkinStage, data.role);
 
     const result = await this.db.q<{ id: string }>(
@@ -333,7 +581,6 @@ export class HjudgeAdminService {
         staffId,
         name,
         role: data.role,
-        checkinStage,
       },
     );
     return { id: result.rows[0].id };
@@ -346,7 +593,7 @@ export class HjudgeAdminService {
       pin?: string;
       role?: string;
       stationNumber?: number;
-      checkinStage?: string | null;
+      checkinStage?: string;
     }>,
     user: HjudgeUser,
     pinHashFn: (pin: string) => string,
@@ -356,11 +603,17 @@ export class HjudgeAdminService {
 
     for (let i = 0; i < users.length; i++) {
       const u = users[i];
-      const staffId = String(u.staffId ?? '').trim().toUpperCase();
+      const staffId = String(u.staffId ?? '')
+        .trim()
+        .toUpperCase();
       const pin = String(u.pin ?? '').trim();
-      const role = String(u.role ?? 'judge').trim().toLowerCase();
+      const role = String(u.role ?? 'judge')
+        .trim()
+        .toLowerCase();
       const name = String(u.name ?? '').trim() || staffId;
-      const stationNumber = u.stationNumber ? Number(u.stationNumber) : undefined;
+      const stationNumber = u.stationNumber
+        ? Number(u.stationNumber)
+        : undefined;
 
       if (!staffId) {
         errors.push(`Row ${i + 1}: Missing Staff ID`);
@@ -378,7 +631,18 @@ export class HjudgeAdminService {
       }
       try {
         await this.createUser(
-          { staffId, name, pin, role, stationNumber, checkinStage: u.checkinStage },
+          {
+            staffId,
+            name,
+            pin,
+            role,
+            stationNumber,
+            // Validated by createUser's resolver rather than here. A second
+            // copy of the rule is a second place for it to be wrong, and a
+            // batch that accepted a stage the single-create path refuses was
+            // exactly that.
+            checkinStage: u.checkinStage,
+          },
           user,
           pinHashFn,
         );
@@ -400,11 +664,11 @@ export class HjudgeAdminService {
       id: string;
       enabled?: boolean;
       stationNumber?: number | null;
+      checkinStage?: string | null;
       pin?: string;
       name?: string;
       staffId?: string;
       role?: string;
-      checkinStage?: string | null;
     },
     user: HjudgeUser,
     pinHashFn: (pin: string) => string,
@@ -415,15 +679,12 @@ export class HjudgeAdminService {
     const staffId = data.staffId ? data.staffId.trim().toUpperCase() : null;
     const name = data.name ? data.name.trim() : null;
 
-    // A stage is only meaningful next to the role that holds it, and an edit
-    // may be moving the person between roles. Reading it off `data.role` is
-    // what the Team screen sends — every edit posts the role it is saving —
-    // and a PATCH that omits the role is one that is not touching either.
-    //
     // Moving someone off a check-in role takes their stage with them, whether
-    // or not the caller thought to clear it: leaving it would fail the
-    // hyfit_v2_users_stage_role constraint, and the person is off the desk
-    // either way.
+    // or not the caller thought to clear it: leaving it behind fails the
+    // `hyfit_v2_users_stage_role` constraint, and the person is off the desk
+    // either way. `data.role` being present is a safe test for "the role is
+    // being set" — every edit the Team screen posts carries the role it is
+    // saving, and a PATCH that omits it is one that is not touching either.
     const leavingTheDesk =
       Boolean(data.role) && !HJUDGE_STAGE_ROLES.includes(String(data.role));
     const checkinStage = leavingTheDesk
@@ -433,12 +694,8 @@ export class HjudgeAdminService {
         : this.resolveCheckinStage(data.checkinStage, data.role ?? 'checkin');
 
     const result = await this.db.q(
-      // 'CLEAR' is the sentinel for "explicitly emptied" in the two nullable
-      // columns an edit can blank, since a bare NULL parameter is how "not
-      // mentioned" arrives. Neither column can hold the literal — station is
-      // an integer, and the stage CHECK allows only the two stage names.
-      `UPDATE users SET
-        enabled = COALESCE($2, enabled),
+      `UPDATE users SET 
+        enabled = COALESCE($2, enabled), 
         station_number = CASE WHEN $3::text = 'CLEAR' THEN NULL WHEN $3::int IS NOT NULL THEN $3::int ELSE station_number END,
         pin_hash = CASE WHEN $4::text IS NULL THEN pin_hash ELSE $4 END,
         name = COALESCE($5, name),
@@ -450,11 +707,19 @@ export class HjudgeAdminService {
       [
         data.id,
         typeof data.enabled === 'boolean' ? data.enabled : null,
-        data.stationNumber === null ? 'CLEAR' : (data.stationNumber !== undefined ? String(data.stationNumber) : null),
+        data.stationNumber === null
+          ? 'CLEAR'
+          : data.stationNumber !== undefined
+            ? String(data.stationNumber)
+            : null,
         data.pin ? pinHashFn(data.pin) : null,
         name,
         staffId,
         data.role || null,
+        // Same three-way as stationNumber: null clears, undefined leaves alone.
+        // `checkinStage` here is the RESOLVED value, so a stage on a role that
+        // may not hold one has already been refused, and a role change off the
+        // desk has already turned into a clear.
         checkinStage === undefined ? null : (checkinStage ?? 'CLEAR'),
       ],
     );
@@ -466,7 +731,6 @@ export class HjudgeAdminService {
       name: data.name,
       staffId: data.staffId,
       role: data.role,
-      checkinStage: checkinStage === undefined ? undefined : checkinStage,
     });
     return { ok: true };
   }
@@ -523,7 +787,11 @@ export class HjudgeAdminService {
     // timeslot; a blank close means the counter never closes, which is not the
     // same as closing at the slot itself and has to stay expressible.
     const opensBefore = Number(data.checkinOpensBeforeMinutes ?? 240);
-    if (!Number.isInteger(opensBefore) || opensBefore < 0 || opensBefore > 10080) {
+    if (
+      !Number.isInteger(opensBefore) ||
+      opensBefore < 0 ||
+      opensBefore > 10080
+    ) {
       throw new BadRequestException(
         'Check-in must open between 0 minutes and 7 days before the timeslot',
       );
@@ -617,10 +885,9 @@ export class HjudgeAdminService {
         [data.id, user.id],
       );
       if (!published.rowCount) throw new Error('Draft configuration not found');
-      await client.query(
-        'UPDATE events SET updated_at = now() WHERE id = $1',
-        [data.eventId],
-      );
+      await client.query('UPDATE events SET updated_at = now() WHERE id = $1', [
+        data.eventId,
+      ]);
     });
     await this.audit(
       user.id,
@@ -670,4 +937,41 @@ export class HjudgeAdminService {
       ],
     );
   }
+}
+
+/* Everything that hangs off an event, as the delete preflight counts it.
+ *
+ * Every one of these carries `event_id` and is removed by the database's own
+ * CASCADE when the event goes (except `audit_events`, which has no ON DELETE
+ * action and is deleted by hand — see deleteEvent). The list exists to COUNT
+ * them for the confirmation, not to delete them: a table missing from here
+ * still goes, it just goes unannounced, which is the failure mode to prefer
+ * over deleting something this list forgot to mention.
+ *
+ * `users` is the one that surprises people. `hyfit_v2.users.event_id` means
+ * "hired for this event", and it cascades: deleting an event deletes the
+ * volunteers and event admins bound to it, along with their sessions. Console
+ * operators have a NULL event_id and are untouched.
+ */
+const EVENT_OWNED_TABLES: { table: string; label: string }[] = [
+  { table: 'athletes', label: 'athletes' },
+  { table: 'results', label: 'results' },
+  { table: 'certificate_templates', label: 'certificateTemplates' },
+  { table: 'raceresults_endpoints', label: 'raceResultConfigs' },
+  { table: 'event_ingest_tokens', label: 'syncCredentials' },
+  { table: 'event_push_targets', label: 'pushTargets' },
+  { table: 'push_runs', label: 'pushRuns' },
+  { table: 'users', label: 'staffAccounts' },
+  { table: 'audit_events', label: 'auditEntries' },
+];
+
+/* The typed confirmation, compared the way a person types it.
+ *
+ * Case and surrounding space are forgiven; nothing else is. An organiser
+ * copying "HYFIT GAMES BENGALURU" off the screen types it in whatever case
+ * their keyboard is in, and refusing that teaches them to paste without
+ * reading — which is the one habit this confirmation exists to prevent. */
+function namesMatch(typed: string, actual: string): boolean {
+  const norm = (v: string) => String(v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return norm(typed) !== '' && norm(typed) === norm(actual);
 }

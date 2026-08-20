@@ -13,20 +13,27 @@ import {
   ForbiddenException,
   NotFoundException,
   HttpException,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { HjudgeAdminService } from '../services/hjudge-admin.service';
 import {
   HjudgeParticipantSyncService,
   HjudgeSyncError,
 } from '../services/hjudge-participant-sync.service';
 import { HjudgeResultsService } from '../services/hjudge-results.service';
+import { HjudgeCertificatesService } from '../services/hjudge-certificates.service';
 import { HjudgeIngestService } from '../services/hjudge-ingest.service';
 import { HjudgePushService } from '../services/hjudge-push.service';
 import { hjudgeSyncConfig } from '../hjudge-sync.config';
 import { HjudgeUserParam } from '../hjudge-user.decorator';
 import type { HjudgeUser } from '../hjudge-auth.guard';
+import { eventDateError } from '../hjudge-event-dates.util';
 import {
   hashPin,
+  HJUDGE_CHECKIN_STAGES,
   HJUDGE_PIN_PATTERN,
   HJUDGE_STAFF_ROLES,
 } from '../hjudge-session.util';
@@ -42,6 +49,7 @@ export class HjudgeAdminController {
     private readonly adminService: HjudgeAdminService,
     private readonly syncService: HjudgeParticipantSyncService,
     private readonly results: HjudgeResultsService,
+    private readonly certificates: HjudgeCertificatesService,
     // The two halves of offline-event sync. Both are injected on both
     // deployments; each refuses the acts that belong to the other role.
     private readonly ingest: HjudgeIngestService,
@@ -90,7 +98,9 @@ export class HjudgeAdminController {
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
-    return this.adminService.getOverview((await this.scopeTo(user, eventId)).eventId!);
+    return this.adminService.getOverview(
+      (await this.scopeTo(user, eventId)).eventId!,
+    );
   }
 
   @Get('events')
@@ -113,11 +123,27 @@ export class HjudgeAdminController {
       endsAt?: string;
       timezone?: string;
       eventDate?: string;
+      eventEndDate?: string;
+      deliveryMode?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {
     if (!body.name?.trim())
       throw new BadRequestException('Event name is required');
+    const dateError = eventDateError(body.eventDate, body.eventEndDate);
+    if (dateError) throw new BadRequestException(dateError);
+    // Said out loud rather than coerced. 'offline' and 'online' are the whole
+    // set, and anything else is a client that believes in a third mode — which
+    // would otherwise be silently filed as online and discovered at a venue.
+    if (
+      body.deliveryMode !== undefined &&
+      body.deliveryMode !== 'online' &&
+      body.deliveryMode !== 'offline'
+    ) {
+      throw new BadRequestException(
+        'Delivery mode must be either online or offline',
+      );
+    }
     return this.adminService.createEvent(body as any, user);
   }
 
@@ -133,11 +159,24 @@ export class HjudgeAdminController {
       activate?: boolean;
       startsAt?: string;
       endsAt?: string;
+      // Day 1 and the last day. Sent from the console's schedule editor, which
+      // is the only way an event created before it had a second day can get
+      // one — the create form is a one-shot.
+      eventDate?: string | null;
+      eventEndDate?: string | null;
       resultsStatus?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {
     if (!body.id) throw new BadRequestException('Event ID is required');
+    // Checked here rather than left to the CHECK constraint, so a swapped pair
+    // comes back as a sentence. Only when the caller actually sent dates — the
+    // other callers of this route (activate, status, rename) send none, and a
+    // stored event with no Day 1 must stay editable.
+    if (body.eventDate !== undefined || body.eventEndDate !== undefined) {
+      const dateError = eventDateError(body.eventDate, body.eventEndDate);
+      if (dateError) throw new BadRequestException(dateError);
+    }
     // Resolved like every other event id on these screens, and for the reason
     // this one matters most: an UPDATE against an id this schema does not have
     // matches no rows and reports success, so activating an event by its
@@ -149,13 +188,51 @@ export class HjudgeAdminController {
     );
   }
 
+  /* GET /admin/events/delete-impact?eventId= — what a delete would remove.
+     Read before the confirmation is shown, so the operator is told the actual
+     numbers instead of a generic warning. Nothing is changed by this call. */
+  @Get('events/delete-impact')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin'])
+  async eventDeleteImpact(
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    return this.adminService.eventDeleteImpact(
+      (await this.scopeTo(user, eventId)).eventId!,
+    );
+  }
+
+  /* DELETE /admin/events?eventId=&confirm=<event name> — the event and
+     everything that belongs to it.
+
+     super_admin only, and unlike every other route here that is not just
+     caution about scope: an event_admin is hired for one event, and this is the
+     one action whose blast radius is the whole event including their own
+     colleagues' accounts.
+
+     `confirm` is the event's own name, typed. A delete that a single click
+     could do is a delete that happens by accident on a list where two editions
+     of the same race sit next to each other, and none of it is recoverable. */
+  @Delete('events')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin'])
+  async deleteEvent(
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+    @Query('confirm') confirm?: string,
+  ) {
+    const scoped = await this.scopeTo(user, eventId);
+    return this.adminService.deleteEvent(scoped.eventId!, user, confirm ?? '');
+  }
+
   @Get('users')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin', 'readonly'])
   async listUsers(
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
-    return this.adminService.listUsers((await this.scopeTo(user, eventId)).eventId!);
+    return this.adminService.listUsers(
+      (await this.scopeTo(user, eventId)).eventId!,
+    );
   }
 
   @Post('users')
@@ -169,7 +246,7 @@ export class HjudgeAdminController {
       role?: string;
       eventId?: string;
       stationNumber?: number;
-      checkinStage?: string | null;
+      checkinStage?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {
@@ -181,6 +258,12 @@ export class HjudgeAdminController {
       throw new BadRequestException(
         'Staff ID, 4–8 digit PIN, and a role of judge or checkin are required',
       );
+    }
+    if (
+      body.checkinStage &&
+      !HJUDGE_CHECKIN_STAGES.includes(String(body.checkinStage))
+    ) {
+      throw new BadRequestException('Invalid check-in stage');
     }
     try {
       return await this.adminService.createUser(
@@ -206,7 +289,7 @@ export class HjudgeAdminController {
         pin?: string;
         role?: string;
         stationNumber?: number;
-        checkinStage?: string | null;
+        checkinStage?: string;
       }>;
       eventId?: string;
     },
@@ -230,16 +313,24 @@ export class HjudgeAdminController {
       id?: string;
       enabled?: boolean;
       stationNumber?: number;
+      checkinStage?: string | null;
       pin?: string;
       name?: string;
       staffId?: string;
       role?: string;
       eventId?: string;
-      checkinStage?: string | null;
     },
     @HjudgeUserParam() user: HjudgeUser,
   ) {
     if (!body.id) throw new BadRequestException('User ID is required');
+    // Null clears the stage — a judge does not staff a counter. Anything else
+    // must name one of the two stages that exist.
+    if (
+      body.checkinStage != null &&
+      !HJUDGE_CHECKIN_STAGES.includes(String(body.checkinStage))
+    ) {
+      throw new BadRequestException('Invalid check-in stage');
+    }
     // A PIN reset has to clear the same bar as creation — otherwise this route
     // is a back door to the un-loginable account the create route now blocks.
     // An absent or empty pin means "leave it alone", matching updateUser's
@@ -271,7 +362,9 @@ export class HjudgeAdminController {
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
-    return this.adminService.getConfig((await this.scopeTo(user, eventId)).eventId!);
+    return this.adminService.getConfig(
+      (await this.scopeTo(user, eventId)).eventId!,
+    );
   }
 
   @Put('config')
@@ -357,6 +450,45 @@ export class HjudgeAdminController {
       : this.results.pull(scoped, body?.url);
   }
 
+  /* POST /admin/results/upload — multipart "file": the standings as JSON.
+   *
+   * The same act as `results/pull`, for an event whose feed cannot be fetched:
+   * an offline venue, a RaceResult server that is down, an export that arrived
+   * by email. `store` decides the destination exactly as it does there, and the
+   * file goes through the same parser and the same mapping — see
+   * HjudgeResultsService.pullUpload.
+   *
+   * MULTIPART, NOT A JSON BODY. A field of a few hundred athletes with fifteen
+   * times each is megabytes, and the JSON body parser on this app is 100 KB
+   * (which is why the offline push chunks itself at 80 KB). Widening that limit
+   * for every route on the app to accommodate one upload is the wrong trade;
+   * multipart is streamed by multer and bounded here alone.
+   */
+  @Post('results/upload')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 32 * 1024 * 1024 },
+    }),
+  )
+  async uploadResults(
+    @Body() body: { store?: string; eventId?: string },
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+    @UploadedFile() file?: { buffer: Buffer; originalname: string },
+  ) {
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
+    const { data, label } = readJsonUpload(file);
+    // A multipart field arrives as a string, so `store` is compared as one —
+    // `Boolean("false")` is true, and getting that wrong here writes an
+    // unfinished race into the tables the public page serves.
+    return String(body?.store ?? '') === 'true'
+      ? this.results.storeUpload(scoped, data, label)
+      : this.results.pullUpload(scoped, data, label);
+  }
+
   /* PUT /admin/results/mode { mode: 'off' | 'live' | 'stored' } */
   @Put('results/mode')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
@@ -415,6 +547,32 @@ export class HjudgeAdminController {
     return this.results.importAthletes(scoped);
   }
 
+  /* POST /admin/athletes/upload — multipart "file": the start list as JSON.
+   *
+   * The participant endpoint's import, from a file. It REPLACES the roster the
+   * same way that one does — a start list is the roster, whichever door it came
+   * through — so a partial export drops everybody it leaves out. Same transport
+   * reasoning as `results/upload` above. */
+  @Post('athletes/upload')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 32 * 1024 * 1024 },
+    }),
+  )
+  async uploadAthletes(
+    @Body() body: { eventId?: string },
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+    @UploadedFile() file?: { buffer: Buffer; originalname: string },
+  ) {
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
+    const { data, label } = readJsonUpload(file);
+    return this.results.importAthletesUpload(scoped, data, label);
+  }
+
   /* DELETE /admin/athletes?eventId= — the whole roster for one event, and the
      results that hang off it.
 
@@ -433,13 +591,129 @@ export class HjudgeAdminController {
     );
   }
 
+  /* ------------------------------------------------------ certificates
+     The designs the public results page prints from. Event-scoped through
+     `scopeTo` like everything else here, so a bound operator cannot edit
+     another event's certificates by changing the query string.
+
+     Note what is NOT here: any route that issues a certificate to a person.
+     A certificate is rendered in the athlete's browser from the published
+     template and the standings row already on the page, so there is nothing
+     to hand out — see HjudgeCertificatesService. */
+
+  @Get('certificates')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin', 'readonly'])
+  async listCertificateTemplates(
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    return this.certificates.list((await this.scopeTo(user, eventId)).eventId!);
+  }
+
+  @Get('certificates/:id')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin', 'readonly'])
+  async getCertificateTemplate(
+    @Param('id') id: string,
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    return this.certificates.get(
+      (await this.scopeTo(user, eventId)).eventId!,
+      id,
+    );
+  }
+
+  @Post('certificates')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  async createCertificateTemplate(
+    @Body()
+    body: {
+      contests?: string[];
+      is_default?: boolean;
+      name?: string;
+      eventId?: string;
+    },
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
+    return this.certificates.create(scoped, body ?? {});
+  }
+
+  @Put('certificates/:id')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  async updateCertificateTemplate(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      name?: string;
+      /* Present = REPLACE this template's coverage with exactly these
+         contests; absent = leave it alone. The console needs both, because
+         publishing a design and re-scoping it are separate acts. */
+      contests?: string[];
+      is_default?: boolean;
+      schema?: unknown;
+      background_url?: string | null;
+      is_published?: boolean;
+      eventId?: string;
+    },
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
+    return this.certificates.update(scoped, id, body ?? {});
+  }
+
+  @Delete('certificates/:id')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  async deleteCertificateTemplate(
+    @Param('id') id: string,
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    return this.certificates.remove(
+      (await this.scopeTo(user, eventId)).eventId!,
+      id,
+    );
+  }
+
+  /* POST /admin/certificates/:id/background — the artwork, as multipart.
+
+     Bounded here rather than globally for the same reason the results upload
+     is: this is the only route on the app that takes an image, and 20 MB is a
+     print-resolution A4 background with room to spare. */
+  @Post('certificates/:id/background')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: 20 * 1024 * 1024 },
+    }),
+  )
+  async uploadCertificateBackground(
+    @Param('id') id: string,
+    @Body() body: { eventId?: string },
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+    @UploadedFile()
+    file?: { buffer: Buffer; originalname: string; mimetype?: string },
+  ) {
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
+    return this.certificates.uploadBackground(scoped, id, file);
+  }
+
   @Get('participants/sync')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin', 'readonly'])
   async listSyncRuns(
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
-    return this.adminService.listSyncRuns((await this.scopeTo(user, eventId)).eventId!);
+    return this.adminService.listSyncRuns(
+      (await this.scopeTo(user, eventId)).eventId!,
+    );
   }
 
   @Post('participants/sync')
@@ -462,7 +736,6 @@ export class HjudgeAdminController {
       throw error;
     }
   }
-
 
   // ──────────────────────────────────────────────────── offline event sync
   //
@@ -507,8 +780,8 @@ export class HjudgeAdminController {
       roleWasUnrecognised: hjudgeSyncConfig.roleWasUnrecognised,
       event: local.event,
       counts: local.counts,
-      intervals: local.intervals,
-      intervalBounds: local.intervalBounds,
+      pushIntervals: local.pushIntervals,
+      pullIntervals: local.pullIntervals,
       credentials: prod.credentials,
       remoteCounts: prod.counts,
       target: local.target,
@@ -544,7 +817,12 @@ export class HjudgeAdminController {
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
   async mintSyncCredential(
     @Body()
-    body: { label?: string; hours?: number; scopes?: string[]; eventId?: string },
+    body: {
+      label?: string;
+      hours?: number;
+      scopes?: string[];
+      eventId?: string;
+    },
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
@@ -567,55 +845,65 @@ export class HjudgeAdminController {
     return this.ingest.revokeCredential(scoped.eventId!, id, scoped);
   }
 
-  /* POST /admin/sync/bind { athletesUrl, resultsUrl, intervalMinutes?, baseUrl? }
-     — LOCAL. Both endpoints prod issued, stored as pasted; `code` is still
-     accepted for the one-paste form. Handshakes before it stores anything, so a
-     credential for the wrong event fails on a read. */
-  @Post('sync/bind')
+  /* POST /admin/sync/pair { url, baseUrl? } — LOCAL.
+   *
+   * NO `eventId`, AND THAT IS THE CHANGE. Pairing is what CREATES the local
+   * event: the pasted URL names a prod event, the handshake confirms which race
+   * it is, and the row is written here under prod's own id. Scoping this to an
+   * event the operator had already made by hand is what produced two events
+   * that agreed only by luck. Handshakes before it stores anything, so a URL
+   * for the wrong event fails on a read. */
+  @Post('sync/pair')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
-  async bindSyncTarget(
-    @Body()
-    body: {
-      code?: string;
-      baseUrl?: string;
-      athletesUrl?: string;
-      resultsUrl?: string;
-      intervalMinutes?: number;
-      eventId?: string;
-    },
+  async pairSyncTarget(@Body() body: { url?: string; baseUrl?: string }) {
+    return this.push.pair(body ?? {});
+  }
+
+  /* DELETE /admin/sync/pair — LOCAL. Forgets prod; withdraws nothing already
+     published, which is prod's own decision to make, and leaves the local event
+     with everything the last pull gave it. */
+  @Delete('sync/pair')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  async unpairSyncTarget(
+    @HjudgeUserParam() user: HjudgeUser,
+    @Query('eventId') eventId?: string,
+  ) {
+    return this.push.unpair((await this.scopeTo(user, eventId)).eventId!);
+  }
+
+  /* POST /admin/sync/pull — LOCAL. The other button: prod's configuration for
+     this event, applied here. Always applies, even when the digest matches,
+     because the reason somebody presses it is that they doubt what this laptop
+     is holding. */
+  @Post('sync/pull')
+  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
+  async pullNow(
+    @Body() body: { eventId?: string },
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
     const scoped = await this.scopeTo(user, eventId ?? body?.eventId);
-    return this.push.bind(scoped.eventId!, body ?? {});
+    return this.push.pullConfig(scoped.eventId!, 'manual', { force: true });
   }
 
-  /* DELETE /admin/sync/bind — LOCAL. Forgets prod; withdraws nothing already
-     published, which is prod's own decision to make. */
-  @Delete('sync/bind')
-  @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
-  async unbindSyncTarget(
-    @HjudgeUserParam() user: HjudgeUser,
-    @Query('eventId') eventId?: string,
-  ) {
-    return this.push.unbind((await this.scopeTo(user, eventId)).eventId!);
-  }
-
-  /* PUT /admin/sync/config { intervalMinutes?, enabled?, athletesUrl?,
-     resultsUrl?, ... } — LOCAL. The two endpoint boxes and the interval; 0
-     minutes means manual only. Takes effect on the scheduler's next tick, with
-     no restart. Only the fields present change. */
+  /* PUT /admin/sync/config { intervalMinutes?, pullIntervalMinutes?, enabled?,
+     autoImportResults?, baseUrl?, pullUrl?, pushUrl? } — LOCAL.
+     
+     Two intervals, because the two directions answer to different things; 0
+     means manual only on either. Takes effect on the scheduler's next tick,
+     with no restart. */
   @Put('sync/config')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
   async configureSync(
     @Body()
     body: {
       intervalMinutes?: number;
+      pullIntervalMinutes?: number;
       enabled?: boolean;
       autoImportResults?: boolean;
       baseUrl?: string;
-      athletesUrl?: string;
-      resultsUrl?: string;
+      pullUrl?: string;
+      pushUrl?: string;
       eventId?: string;
     },
     @HjudgeUserParam() user: HjudgeUser,
@@ -625,7 +913,7 @@ export class HjudgeAdminController {
     return this.push.configure(scoped.eventId!, body ?? {});
   }
 
-  /* POST /admin/sync/check — LOCAL. Asks prod what the bound credential still
+  /* POST /admin/sync/check — LOCAL. Asks prod what the paired credential still
      opens, and sends nothing. The one call that is safe to make mid-race. */
   @Post('sync/check')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin', 'readonly'])
@@ -636,12 +924,16 @@ export class HjudgeAdminController {
     return this.push.check((await this.scopeTo(user, eventId)).eventId!);
   }
 
-  /* POST /admin/sync/push { kind: 'athletes' | 'results' } — LOCAL.
+  /* POST /admin/sync/push { kind: 'results' | 'results_final' } — LOCAL.
    *
-   * The roster button and the "push the results now" button. A manual results
-   * push always sends, even when nothing has changed: the reason somebody
-   * presses it is that they suspect prod is not holding what this database
-   * says, and a digest match is exactly the answer they are doubting. */
+   * The "push the results now" button. A manual results push always sends, even
+   * when nothing has changed: the reason somebody presses it is that they
+   * suspect prod is not holding what this database says, and a digest match is
+   * exactly the answer they are doubting.
+   *
+   * There is no `athletes` kind since 093. Every result carries its own
+   * athlete, so there is no roster to send separately and no order to send them
+   * in. See HjudgePushService.pushResults. */
   @Post('sync/push')
   @SetMetadata(HJUDGE_ROLES_KEY, ['super_admin', 'event_admin'])
   async pushNow(
@@ -649,16 +941,46 @@ export class HjudgeAdminController {
     @HjudgeUserParam() user: HjudgeUser,
     @Query('eventId') eventId?: string,
   ) {
-    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId)).eventId!;
+    const scoped = (await this.scopeTo(user, eventId ?? body?.eventId))
+      .eventId!;
     const kind = String(body?.kind ?? '').trim();
-    if (kind === 'athletes') return this.push.pushAthletes(scoped, 'manual');
     if (kind === 'results')
       return this.push.pushResults(scoped, 'manual', { force: true });
     // The end-of-day act: the standings into prod's tables rather than its
     // cache, so they are still there tomorrow. See pushFinalResults.
-    if (kind === 'results_final') return this.push.pushFinalResults(scoped, 'manual');
+    if (kind === 'results_final')
+      return this.push.pushFinalResults(scoped, 'manual');
+    throw new BadRequestException('Push results or results_final');
+  }
+}
+
+/**
+ * A picked file, turned into the payload the importers read.
+ *
+ * The parse happens HERE rather than in the service so a file that is not JSON
+ * at all — a CSV renamed, half a download, a saved HTML error page — fails with
+ * a sentence naming the file, before anything has been read as a start list.
+ * The importers below it deal only in payloads that parsed.
+ */
+function readJsonUpload(file?: { buffer: Buffer; originalname: string }): {
+  data: unknown;
+  label: string;
+} {
+  if (!file?.buffer?.length)
+    throw new BadRequestException('Attach a JSON file as "file"');
+
+  const label = file.originalname?.trim() || 'the uploaded file';
+  let text = file.buffer.toString('utf8');
+  // A BOM is what an export saved out of Excel or Notepad on Windows carries,
+  // and JSON.parse rejects it with "Unexpected token" pointing at column 1 —
+  // which reads as a corrupt file rather than a harmless prefix.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+
+  try {
+    return { data: JSON.parse(text), label };
+  } catch (err) {
     throw new BadRequestException(
-      'Push athletes, results, or results_final',
+      `${label} is not valid JSON: ${(err as Error).message}`,
     );
   }
 }

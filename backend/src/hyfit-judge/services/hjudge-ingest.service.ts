@@ -6,7 +6,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { HjudgeDbService } from '../hjudge-db.service';
 import { HjudgeCacheService } from '../hjudge-cache.service';
 import { HjudgeResultsService } from './hjudge-results.service';
@@ -16,6 +16,7 @@ import {
   hjudgeSyncConfig,
   type HjudgeIngestScope,
 } from '../hjudge-sync.config';
+import { encodeSyncPair } from '../hjudge-sync-credential.util';
 import type { HjudgeIngestPrincipal } from '../hjudge-ingest.guard';
 import type { HjudgeUser } from '../hjudge-auth.guard';
 
@@ -33,6 +34,10 @@ export interface IngestAthleteRow {
   gender: string | null;
   date_of_birth: string | null;
   age: number | null;
+  /** The band beneath the contest. Added to `athletes` by 091, which landed
+   *  after 086 wrote this contract — a roster pushed without it arrived on prod
+   *  with the column silently empty. */
+  age_group: string | null;
   mobile: string | null;
   club: string | null;
   category: string;
@@ -47,19 +52,40 @@ export interface IngestAthleteRow {
   updated_at: string;
 }
 
-/** One result, exactly as `hyfit_v2.results` holds it. */
+/** One result, exactly as `hyfit_v2.results` holds it — and the athlete it
+ *  belongs to, carried with it.
+ *
+ *  WHY THE ATHLETE TRAVELS ON THE RESULT. `results.athlete_id` is NOT NULL and
+ *  references `athletes(id)`, so a result can only land where its athlete
+ *  already is. Until 093 that was arranged by pushing a whole roster first, out
+ *  of a second endpoint, in the right order — and a results push that arrived
+ *  before one was refused with "push the roster for this event first", which is
+ *  a message about a button the operator had not pressed rather than about
+ *  anything wrong with their data.
+ *
+ *  A result now brings its own athlete and the receiver upserts the pair in one
+ *  transaction. There is no roster endpoint, no ordering between two pushes to
+ *  get wrong, and no way for the two to disagree about who ran — because they
+ *  are no longer two pushes. See migration 093. */
 export interface IngestResultRow {
   id: string;
   athlete_id: string;
+  /** The athlete this result belongs to, written before the result is. Its
+   *  `id` must equal `athlete_id` above; the receiver refuses the pair if not,
+   *  because a mismatch means the sender built the row from two different
+   *  people. */
+  athlete: IngestAthleteRow;
   bib: string;
   name: string;
   category: string | null;
   club: string | null;
   status: string;
   rank: number | null;
+  age_group: string | null;
   age_group_rank: number | null;
   total_ms: number | null;
   team_time_ms: number | null;
+  team_rank: number | null;
   cog_ms: number | null;
   run1_ms: number | null;
   st1_ms: number | null;
@@ -74,6 +100,7 @@ export interface IngestResultRow {
   run6_ms: number | null;
   st6_ms: number | null;
   penalties: Record<string, unknown>;
+  extra_times: Record<string, unknown>;
   raw: Record<string, unknown>;
   source_url: string | null;
   imported_at: string;
@@ -100,16 +127,19 @@ const STAGE_TTL_SECONDS = 15 * 60;
 /**
  * The receiving half of an offline event.
  *
- * Two jobs that share a table and nothing else:
+ * Three jobs that share a table and nothing else:
  *
  *   1. MINTING. The console creates a credential for one offline event; the
  *      secret is returned once, here, and never again — only its hash is kept.
- *   2. RECEIVING. A local server pushes the event's roster and standings in
- *      chunks, and this writes them into the same two tables the RaceResult
- *      importer writes, then invalidates the same cache keys. From the public
- *      read's point of view an offline event is indistinguishable from an
- *      online one, which is the whole design: `HjudgePublicController` does not
- *      know this file exists.
+ *   2. ANSWERING. A local server asks what prod knows about the event, and
+ *      `eventConfig` hands back the whole of it — so a venue laptop is set up
+ *      by pasting one URL rather than by retyping what an admin already entered.
+ *   3. RECEIVING. That server pushes the standings back in chunks, each result
+ *      carrying its own athlete, and this writes them into the same two tables
+ *      the RaceResult importer writes, then invalidates the same cache keys.
+ *      From the public read's point of view an offline event is
+ *      indistinguishable from an online one, which is the whole design:
+ *      `HjudgePublicController` does not know this file exists.
  *
  * WHY THE TABLES AND NOT THE CACHE. The obvious shortcut is to push straight
  * into Valkey, since that is what a live event serves. It is the wrong
@@ -221,36 +251,61 @@ export class HjudgeIngestService {
         eventId,
         tokenHash(secret),
         secret.slice(0, 18),
-        String(body?.label ?? '').trim().slice(0, 120),
+        String(body?.label ?? '')
+          .trim()
+          .slice(0, 120),
         scopes,
         hours,
         user?.id ?? null,
       ],
     );
 
-    await this.audit(eventId, user?.id ?? null, 'sync.credential.mint', row!.id, {
-      scopes,
-      hours,
-    });
+    await this.audit(
+      eventId,
+      user?.id ?? null,
+      'sync.credential.mint',
+      row!.id,
+      {
+        scopes,
+        hours,
+      },
+    );
 
     this.logger.log(
       `Sync credential ${row!.id} minted for event ${eventId} (${scopes.join(', ')}, ${hours}h)`,
     );
 
+    // The two endpoints, ready to paste — built against the address prod is
+    // actually reached on rather than one guessed here.
+    //
+    // WHY `publicBaseUrl` AND NOT THE REQUEST'S HOST. The console operator may
+    // be on an internal hostname, a VPN name, or localhost during a rehearsal,
+    // and the URL they copy has to work from a laptop at a venue on the far
+    // side of the internet. That is a deployment fact, so it comes from the
+    // environment. When it is unset the origin is left off and the console asks
+    // the operator to fill it in, which is visibly incomplete — better than a
+    // URL that looks right and resolves to nothing from the venue.
+    const baseUrl = hjudgeSyncConfig.publicBaseUrl;
+    const pair = baseUrl ? encodeSyncPair(baseUrl, eventId, secret) : null;
+
     return {
       id: row!.id,
       expiresAt: row!.expires_at,
       scopes,
-      /** Everything the local server needs, in one thing to copy. It carries
-       *  the prod event id because the two databases were created by hand and
-       *  neither knows the other's uuid — see `event_push_targets`. */
-      credential: {
-        baseUrl: '',
-        eventId,
-        eventName: event.name,
-        token: secret,
-        expiresAt: row!.expires_at,
-      },
+      eventId,
+      eventName: event.name,
+      /** The secret, once. It is not stored and this response is the only place
+       *  it will ever exist outside the venue laptop it is about to be pasted
+       *  into. */
+      token: secret,
+      /** What the operator copies: the GET the venue pulls its configuration
+       *  from, and the POST it publishes standings to. Pasting EITHER into the
+       *  local console pairs it for both — see `parseSyncEndpoint`. */
+      pullUrl: pair?.pullUrl ?? '',
+      pushUrl: pair?.pushUrl ?? '',
+      /** Set when this deployment does not know its own public address, so the
+       *  console can say so rather than render two half-built URLs. */
+      baseUrlMissing: !baseUrl,
     };
   }
 
@@ -263,7 +318,13 @@ export class HjudgeIngestService {
       [tokenId, eventId],
     );
     if (!row) throw new NotFoundException('Credential not found');
-    await this.audit(eventId, user?.id ?? null, 'sync.credential.revoke', row.id, {});
+    await this.audit(
+      eventId,
+      user?.id ?? null,
+      'sync.credential.revoke',
+      row.id,
+      {},
+    );
     return { revoked: true };
   }
 
@@ -344,122 +405,130 @@ export class HjudgeIngestService {
   }
 
   /**
-   * One chunk of a roster snapshot.
+   * EVERYTHING PROD KNOWS ABOUT THIS EVENT, in one GET.
    *
-   * The rows carry the local server's own ids and keep them here: prod's
-   * `athletes.id` for an offline event IS the venue's, which is what lets the
-   * results chunk reference `athlete_id` directly instead of re-deriving who
-   * each result belongs to from a name and a phone number.
+   * This is the other direction, and the reason 093 exists. Before it, a venue
+   * laptop was set up by somebody retyping — the event's name, its dates, its
+   * RaceResult URLs and mappings, its declaration text, its check-in window —
+   * all of it already entered once on prod, entered again at six in the morning
+   * from a phone screen, and thereafter free to disagree. A correction made on
+   * prod reached the venue by telephone or not at all.
    *
-   * The delete before the insert is the price of that. `hyfit_v2_athletes_entry`
-   * (085) makes (event, phone, name, category) unique, so a prod row that
-   * already describes an incoming athlete under a DIFFERENT id — a roster
-   * imported here before the event was moved offline, or a venue laptop rebuilt
-   * mid-event — would fail the insert on a constraint the `ON CONFLICT (id)`
-   * clause cannot see. Clearing those first makes the push authoritative, which
-   * for an offline event it is.
+   * The local server calls this and applies what comes back. There is one
+   * event, in two places, under ONE id: the local event is created BY the first
+   * pull carrying prod's uuid, so nothing has to be mapped and no screen has to
+   * ask which of two events it means.
+   *
+   * WHAT IS DELIBERATELY NOT IN HERE.
+   *
+   *   * People. Athletes, results, staff, sessions, PINs. The roster is not a
+   *     thing that travels any more (see `IngestResultRow`) and the rest is the
+   *     venue's own business — a credential that could read prod's staff table
+   *     would be a credential worth stealing for something other than a race.
+   *
+   *   * `otp_config` (090). It is global rather than per-event and it holds a
+   *     gateway's API key, so putting it in an event-scoped response would
+   *     widen what one venue's credential is worth to every event on the
+   *     platform. A local server that needs to send athlete OTPs is configured
+   *     with its own.
+   *
+   *   * `delivery_mode` is reported but is NOT the local server's to adopt. It
+   *     is prod's statement about where the event is run; the guard already
+   *     refuses this call for anything but `offline`, so a local server reading
+   *     it back would only ever be told what it already knows.
+   *
+   * WHY THE RACERESULT CREDENTIALS *ARE* IN HERE, having been forbidden in 086.
+   * 086 was describing the other direction: prod has no use for a venue's
+   * RaceResult keys, so sending them up was storing a secret in a second place
+   * for no reader's benefit. The venue laptop is precisely the machine that
+   * needs them, and prod is where they are already configured.
    */
-  async ingestAthletes(
-    principal: HjudgeIngestPrincipal,
-    chunk: IngestChunk<IngestAthleteRow>,
-  ) {
-    const batch = this.batchId(chunk);
-    const rows = this.rowsOf(chunk, 'athletes');
+  async eventConfig(principal: HjudgeIngestPrincipal) {
+    const event = await this.db.q1(
+      // NOT `live_results_enabled`. That column is on `hyfit.events` (077) and
+      // this pool is pinned to `hyfit_v2` — selecting it here fails with
+      // `column does not exist` on every pull. The live-results toggle is read
+      // by HfgLiveResultsService through the OTHER pool, which is still pinned
+      // to `hyfit`; until those two agree on a schema it is not a fact this
+      // module can carry.
+      `SELECT id, name, venue, timezone, starts_at, ends_at,
+              event_date, event_end_date, status, is_active,
+              results_mode, delivery_mode,
+              created_at, updated_at
+         FROM events WHERE id = $1`,
+      [principal.eventId],
+    );
+    if (!event) throw new NotFoundException('Event not found');
 
-    const written = await this.db.tx(async (client) => {
-      if (!rows.length) return 0;
+    // The newest PUBLISHED version, not the newest row. `raceresults_endpoints`
+    // is versioned and a draft is an admin mid-edit — shipping that to a venue
+    // would push a half-typed URL onto the tablets the moment somebody clicked
+    // into the field. An event whose config has never been published sends
+    // null, and the local server says "prod has not published a configuration
+    // for this event yet" rather than wiping its own.
+    const config = await this.db.q1(
+      `SELECT id, event_id AS "eventId", version, state,
+              bib_lookup_url AS "participantApiUrl",
+              update_url AS "updateApiUrl",
+              map_lookup_url AS "mapLookupUrl",
+              results_url AS "resultsUrl",
+              auth_scheme AS "authScheme",
+              auth_param_name AS "authParamName",
+              auth_token AS "authToken",
+              participant_mapping AS "participantMapping",
+              update_mapping AS "updateMapping",
+              results_mapping AS "resultsMapping",
+              declaration_text AS "declarationText",
+              declaration_version AS "declarationVersion",
+              checkin_window_enabled AS "checkinWindowEnabled",
+              checkin_opens_before_minutes AS "checkinOpensBeforeMinutes",
+              checkin_closes_after_minutes AS "checkinClosesAfterMinutes",
+              published_at AS "publishedAt"
+         FROM raceresults_endpoints
+        WHERE event_id = $1 AND state = 'published'
+        ORDER BY version DESC LIMIT 1`,
+      [principal.eventId],
+    );
 
-      await client.query(
-        `DELETE FROM athletes a
-           USING jsonb_to_recordset($2::jsonb)
-                 AS t(id uuid, mobile text, name text, category text)
-          WHERE a.event_id = $1::uuid
-            AND a.id <> t.id
-            AND hyfit_v2.mobile_key(a.mobile)    = hyfit_v2.mobile_key(t.mobile)
-            AND hyfit_v2.name_key(a.name)        = hyfit_v2.name_key(t.name)
-            AND hyfit_v2.contest_key(a.category) = hyfit_v2.contest_key(t.category)`,
-        [
-          principal.eventId,
-          JSON.stringify(
-            rows.map((r) => ({
-              id: r.id,
-              mobile: r.mobile ?? '',
-              name: r.name ?? '',
-              category: r.category ?? '',
-            })),
-          ),
-        ],
-      );
-
-      const inserted = await client.query(
-        `INSERT INTO athletes (
-           id, event_id, bib, name, gender, date_of_birth, age, mobile, club,
-           category, contest_id, wave, timeslot, contest_date, source,
-           source_id, raw, created_at, updated_at, sync_batch)
-         SELECT t.id, $1::uuid, t.bib, t.name, t.gender, t.date_of_birth, t.age,
-                t.mobile, t.club, COALESCE(t.category, ''), t.contest_id,
-                t.wave, t.timeslot, t.contest_date,
-                COALESCE(NULLIF(t.source, ''), 'raceresult'), t.source_id,
-                COALESCE(t.raw, '{}'::jsonb),
-                COALESCE(t.created_at, now()), COALESCE(t.updated_at, now()), $3::uuid
-           FROM jsonb_to_recordset($2::jsonb) AS t(
-                  id uuid, bib text, name text, gender text,
-                  date_of_birth date, age integer, mobile text, club text,
-                  category text, contest_id text, wave text, timeslot text,
-                  contest_date date, source text, source_id text, raw jsonb,
-                  created_at timestamptz, updated_at timestamptz)
-         ON CONFLICT (id) DO UPDATE SET
-           bib           = excluded.bib,
-           name          = excluded.name,
-           gender        = excluded.gender,
-           date_of_birth = excluded.date_of_birth,
-           age           = excluded.age,
-           mobile        = excluded.mobile,
-           club          = excluded.club,
-           category      = excluded.category,
-           contest_id    = excluded.contest_id,
-           wave          = excluded.wave,
-           timeslot      = excluded.timeslot,
-           contest_date  = excluded.contest_date,
-           source        = excluded.source,
-           source_id     = excluded.source_id,
-           raw           = excluded.raw,
-           updated_at    = excluded.updated_at,
-           sync_batch    = excluded.sync_batch`,
-        [principal.eventId, JSON.stringify(rows), batch],
-      );
-      return inserted.rowCount ?? 0;
-    });
-
-    const pruned = chunk?.final
-      ? await this.finishAthletes(principal.eventId, batch)
-      : 0;
-
-    if (chunk?.final) await this.cache.invalidateEvent(principal.eventId);
+    // Certificates travel because a certificate is a result, printed: the
+    // layout is prod's and the venue prints from the same one. `background_url`
+    // is an absolute URL into prod's asset bucket, so it resolves from the
+    // venue without the image itself having to cross.
+    const templates = await this.db.q(
+      `SELECT t.id, t.name, t.is_default, t.background_url, t.schema,
+              t.is_published, t.created_at, t.updated_at,
+              COALESCE(
+                array_agg(c.contest ORDER BY c.contest)
+                  FILTER (WHERE c.contest IS NOT NULL),
+                '{}'
+              ) AS contests
+         FROM certificate_templates t
+         LEFT JOIN certificate_template_contests c ON c.template_id = t.id
+        WHERE t.event_id = $1
+        GROUP BY t.id
+        ORDER BY t.is_default DESC, t.name`,
+      [principal.eventId],
+    );
 
     return {
-      received: rows.length,
-      written,
-      pruned,
-      batch,
-      final: Boolean(chunk?.final),
+      event,
+      config,
+      certificateTemplates: templates.rows,
+      /** So the local server can tell an unchanged pull from a changed one
+       *  without diffing the bundle itself — see `config_fingerprint` in 093.
+       *  It is a digest of what is above, computed here so both ends cannot
+       *  disagree about what "unchanged" means. */
+      fingerprint: this.fingerprint({
+        event,
+        config,
+        certificateTemplates: templates.rows,
+      }),
+      /** So a local server can refuse to pair with a receiver that would reject
+       *  every chunk it is about to build. */
+      maxBytes: hjudgeSyncConfig.pushMaxBytes,
     };
   }
 
-  /**
-   * One chunk of a standings snapshot.
-   *
-   * `results` is one row per athlete (085's `hyfit_v2_results_athlete`), so a
-   * result arriving for an athlete who already has one under a different id has
-   * to displace it — same shape as the roster's natural-key clear above, one
-   * column narrower.
-   *
-   * A result whose athlete this server does not have is refused with a message
-   * that says what to do about it. It means the roster and the standings were
-   * pushed out of order, the local server's own push sequence prevents it, and
-   * the alternative — inventing an athlete row from a result — is how a start
-   * list quietly grows people nobody entered.
-   */
   /**
    * One chunk of a standings snapshot — into the CACHE, or into the tables.
    *
@@ -590,11 +659,94 @@ export class HjudgeIngestService {
     batch: string,
     rows: IngestResultRow[],
   ) {
+    const athletes = this.athletesOf(rows);
+
     let written = 0;
     try {
       written = await this.db.tx(async (client) => {
         if (!rows.length) return 0;
 
+        // ── the athletes first, in the same transaction ──────────────────
+        //
+        // A result cannot be written before the row it references exists, and
+        // since 093 there is no separate push that would have put it there. So
+        // the pair lands together or neither does: a chunk that fails leaves
+        // prod holding exactly what it held before, and the sender can simply
+        // send it again.
+        //
+        // The delete before the insert is the price of carrying the venue's own
+        // ids. `hyfit_v2_athletes_entry` (085) makes (event, phone, name,
+        // category) unique, so a prod row that already describes an incoming
+        // athlete under a DIFFERENT id — a roster imported here before the
+        // event was moved offline, or a venue laptop rebuilt mid-event — would
+        // fail the insert on a constraint `ON CONFLICT (id)` cannot see.
+        // Clearing those first makes the push authoritative, which for an
+        // offline event it is.
+        await client.query(
+          `DELETE FROM athletes a
+             USING jsonb_to_recordset($2::jsonb)
+                   AS t(id uuid, mobile text, name text, category text)
+            WHERE a.event_id = $1::uuid
+              AND a.id <> t.id
+              AND hyfit_v2.mobile_key(a.mobile)    = hyfit_v2.mobile_key(t.mobile)
+              AND hyfit_v2.name_key(a.name)        = hyfit_v2.name_key(t.name)
+              AND hyfit_v2.contest_key(a.category) = hyfit_v2.contest_key(t.category)`,
+          [
+            principal.eventId,
+            JSON.stringify(
+              athletes.map((a) => ({
+                id: a.id,
+                mobile: a.mobile ?? '',
+                name: a.name ?? '',
+                category: a.category ?? '',
+              })),
+            ),
+          ],
+        );
+
+        await client.query(
+          `INSERT INTO athletes (
+             id, event_id, bib, name, gender, date_of_birth, age, age_group,
+             mobile, club, category, contest_id, wave, timeslot, contest_date,
+             source, source_id, raw, created_at, updated_at, sync_batch)
+           SELECT t.id, $1::uuid, t.bib, t.name, t.gender, t.date_of_birth,
+                  t.age, t.age_group, t.mobile, t.club,
+                  COALESCE(t.category, ''), t.contest_id,
+                  t.wave, t.timeslot, t.contest_date,
+                  COALESCE(NULLIF(t.source, ''), 'raceresult'), t.source_id,
+                  COALESCE(t.raw, '{}'::jsonb),
+                  COALESCE(t.created_at, now()), COALESCE(t.updated_at, now()),
+                  $3::uuid
+             FROM jsonb_to_recordset($2::jsonb) AS t(
+                    id uuid, bib text, name text, gender text,
+                    date_of_birth date, age integer, age_group text,
+                    mobile text, club text, category text, contest_id text,
+                    wave text, timeslot text, contest_date date, source text,
+                    source_id text, raw jsonb,
+                    created_at timestamptz, updated_at timestamptz)
+           ON CONFLICT (id) DO UPDATE SET
+             bib           = excluded.bib,
+             name          = excluded.name,
+             gender        = excluded.gender,
+             date_of_birth = excluded.date_of_birth,
+             age           = excluded.age,
+             age_group     = excluded.age_group,
+             mobile        = excluded.mobile,
+             club          = excluded.club,
+             category      = excluded.category,
+             contest_id    = excluded.contest_id,
+             wave          = excluded.wave,
+             timeslot      = excluded.timeslot,
+             contest_date  = excluded.contest_date,
+             source        = excluded.source,
+             source_id     = excluded.source_id,
+             raw           = excluded.raw,
+             updated_at    = excluded.updated_at,
+             sync_batch    = excluded.sync_batch`,
+          [principal.eventId, JSON.stringify(athletes), batch],
+        );
+
+        // ── then the results ─────────────────────────────────────────────
         await client.query(
           `DELETE FROM results r
              USING jsonb_to_recordset($2::jsonb) AS t(id uuid, athlete_id uuid)
@@ -612,25 +764,31 @@ export class HjudgeIngestService {
         const inserted = await client.query(
           `INSERT INTO results (
              id, event_id, athlete_id, bib, name, category, club, status,
-             rank, age_group_rank, total_ms, team_time_ms, cog_ms,
+             rank, age_group, age_group_rank, age, total_ms, team_time_ms,
+             team_rank, cog_ms,
              run1_ms, st1_ms, run2_ms, st2_ms, run3_ms, st3_ms,
              run4_ms, st4_ms, run5_ms, st5_ms, run6_ms, st6_ms,
-             penalties, raw, source_url, imported_at, sync_batch)
+             penalties, extra_times, raw, source_url, imported_at, sync_batch)
            SELECT t.id, $1::uuid, t.athlete_id, t.bib, t.name, t.category, t.club,
                   COALESCE(NULLIF(t.status, ''), 'FIN'),
-                  t.rank, t.age_group_rank, t.total_ms, t.team_time_ms, t.cog_ms,
+                  t.rank, t.age_group, t.age_group_rank, t.age, t.total_ms,
+                  t.team_time_ms, t.team_rank, t.cog_ms,
                   t.run1_ms, t.st1_ms, t.run2_ms, t.st2_ms, t.run3_ms, t.st3_ms,
                   t.run4_ms, t.st4_ms, t.run5_ms, t.st5_ms, t.run6_ms, t.st6_ms,
-                  COALESCE(t.penalties, '{}'::jsonb), COALESCE(t.raw, '{}'::jsonb),
+                  COALESCE(t.penalties, '{}'::jsonb),
+                  COALESCE(t.extra_times, '{}'::jsonb),
+                  COALESCE(t.raw, '{}'::jsonb),
                   t.source_url, COALESCE(t.imported_at, now()), $3::uuid
              FROM jsonb_to_recordset($2::jsonb) AS t(
                     id uuid, athlete_id uuid, bib text, name text, category text,
-                    club text, status text, rank integer, age_group_rank integer,
-                    total_ms bigint, team_time_ms bigint, cog_ms bigint,
+                    club text, status text, rank integer, age_group text,
+                    age_group_rank integer, age integer,
+                    total_ms bigint, team_time_ms bigint, team_rank integer,
+                    cog_ms bigint,
                     run1_ms bigint, st1_ms bigint, run2_ms bigint, st2_ms bigint,
                     run3_ms bigint, st3_ms bigint, run4_ms bigint, st4_ms bigint,
                     run5_ms bigint, st5_ms bigint, run6_ms bigint, st6_ms bigint,
-                    penalties jsonb, raw jsonb, source_url text,
+                    penalties jsonb, extra_times jsonb, raw jsonb, source_url text,
                     imported_at timestamptz)
            ON CONFLICT (id) DO UPDATE SET
              athlete_id     = excluded.athlete_id,
@@ -640,9 +798,12 @@ export class HjudgeIngestService {
              club           = excluded.club,
              status         = excluded.status,
              rank           = excluded.rank,
+             age_group      = excluded.age_group,
              age_group_rank = excluded.age_group_rank,
+             age            = excluded.age,
              total_ms       = excluded.total_ms,
              team_time_ms   = excluded.team_time_ms,
+             team_rank      = excluded.team_rank,
              cog_ms         = excluded.cog_ms,
              run1_ms = excluded.run1_ms, st1_ms = excluded.st1_ms,
              run2_ms = excluded.run2_ms, st2_ms = excluded.st2_ms,
@@ -651,6 +812,7 @@ export class HjudgeIngestService {
              run5_ms = excluded.run5_ms, st5_ms = excluded.st5_ms,
              run6_ms = excluded.run6_ms, st6_ms = excluded.st6_ms,
              penalties      = excluded.penalties,
+             extra_times    = excluded.extra_times,
              raw            = excluded.raw,
              source_url     = excluded.source_url,
              imported_at    = excluded.imported_at,
@@ -660,9 +822,15 @@ export class HjudgeIngestService {
         return inserted.rowCount ?? 0;
       });
     } catch (error: any) {
+      // 23503 used to mean "the roster was not pushed first" and was answered
+      // with an instruction to press the other button. There is no other button
+      // now — the athlete is written from this same payload, immediately above
+      // — so a foreign key that still fails means the payload itself is
+      // inconsistent, and saying so is more use than a workflow hint that no
+      // longer applies to anything.
       if (error?.code === '23503') {
         throw new BadRequestException(
-          'These results reference athletes this server does not have. Push the roster for this event first, then push the results.',
+          'A result in this push references an athlete the push did not carry. Every result must travel with its own athlete — resend the standings.',
         );
       }
       throw error;
@@ -686,33 +854,40 @@ export class HjudgeIngestService {
 
   // ───────────────────────────────────────────────────────────── internals
 
-  /** The roster is complete: whatever this event still holds that the push did
-   *  not bring is no longer on the start list. `results.athlete_id` cascades,
-   *  so an athlete withdrawn at the venue takes their result with them. */
-  private async finishAthletes(eventId: string, batch: string) {
-    const removed = await this.db.q(
-      `DELETE FROM athletes
-        WHERE event_id = $1::uuid AND sync_batch IS DISTINCT FROM $2::uuid`,
-      [eventId, batch],
-    );
-    this.logger.log(
-      `Roster push complete for ${eventId} (batch ${batch}): ${removed.rowCount ?? 0} stale athlete(s) removed`,
-    );
-    return removed.rowCount ?? 0;
-  }
-
-  /** The standings are complete. `results_stored_at` is stamped because that is
-   *  what the console and the public read mean by "when did this event last
-   *  publish" — an offline event that never touches the RaceResult importer
-   *  would otherwise show as never having stored anything.
+  /**
+   * The standings are complete: both halves of what the push carried are
+   * pruned to what it actually brought.
    *
-   *  The MODE is deliberately not touched. What is public is prod's decision,
-   *  made once on the Sync screen, and a push that could turn the standings on
-   *  by itself would publish an unfinished race the first time somebody tested
-   *  the connection. */
+   * ONE PRUNE, TWO TABLES, IN THIS ORDER. `results` goes first and `athletes`
+   * second, because `results.athlete_id` cascades — deleting a stale athlete
+   * takes their result with them, and doing that BEFORE the results prune would
+   * silently widen it beyond the batch. Deleting the results first means the
+   * athlete prune only ever removes people this push did not mention, which is
+   * what withdrawn means.
+   *
+   * The athlete prune is what stops a venue's start list growing forever on
+   * prod. A person who was entered, raced, and was then removed at the venue is
+   * absent from the next push; without this they would stay on prod's roster
+   * indefinitely, counted by every screen that counts athletes.
+   *
+   * `results_stored_at` is stamped because that is what the console and the
+   * public read mean by "when did this event last publish" — an offline event
+   * that never touches the RaceResult importer would otherwise show as never
+   * having stored anything.
+   *
+   * The MODE is deliberately not touched. What is public is prod's decision,
+   * made once on the Sync screen, and a push that could turn the standings on
+   * by itself would publish an unfinished race the first time somebody tested
+   * the connection.
+   */
   private async finishResults(eventId: string, batch: string) {
     const removed = await this.db.q(
       `DELETE FROM results
+        WHERE event_id = $1::uuid AND sync_batch IS DISTINCT FROM $2::uuid`,
+      [eventId, batch],
+    );
+    const withdrawn = await this.db.q(
+      `DELETE FROM athletes
         WHERE event_id = $1::uuid AND sync_batch IS DISTINCT FROM $2::uuid`,
       [eventId, batch],
     );
@@ -722,9 +897,65 @@ export class HjudgeIngestService {
       [eventId],
     );
     this.logger.log(
-      `Results push complete for ${eventId} (batch ${batch}): ${removed.rowCount ?? 0} stale row(s) removed`,
+      `Results push complete for ${eventId} (batch ${batch}): ` +
+        `${removed.rowCount ?? 0} stale result(s) and ` +
+        `${withdrawn.rowCount ?? 0} withdrawn athlete(s) removed`,
     );
     return removed.rowCount ?? 0;
+  }
+
+  /**
+   * The athletes a results chunk carries, one per athlete, validated.
+   *
+   * TWO CHECKS, AND BOTH HAVE BITTEN. A result whose `athlete_id` does not
+   * match the `id` of the athlete travelling with it was built from two
+   * different people, and would write one person's row and another person's
+   * result against it — which the foreign key cannot catch, because both ids
+   * exist. And the same athlete legitimately appears on several rows of one
+   * chunk (a doubles entrant has a team result and an individual one), so the
+   * list is deduplicated by id before it reaches an INSERT whose ON CONFLICT
+   * cannot see a duplicate inside its own VALUES.
+   */
+  private athletesOf(rows: IngestResultRow[]): IngestAthleteRow[] {
+    const byId = new Map<string, IngestAthleteRow>();
+    for (const row of rows) {
+      const athlete = row?.athlete;
+      if (!athlete || !athlete.id) {
+        throw new BadRequestException(
+          `The result for bib ${row?.bib ?? '(none)'} carries no athlete. Every result must travel with the athlete it belongs to.`,
+        );
+      }
+      if (athlete.id !== row.athlete_id) {
+        throw new BadRequestException(
+          `The result for bib ${row.bib} names athlete ${row.athlete_id} but carries athlete ${athlete.id}.`,
+        );
+      }
+      byId.set(athlete.id, athlete);
+    }
+    return [...byId.values()];
+  }
+
+  /** A stable digest of the configuration bundle, so the local server can tell
+   *  a pull that changed something from one that did not without diffing it.
+   *  Keys are sorted at every level: `JSON.stringify` preserves insertion
+   *  order, and two queries that return the same row can return its columns in
+   *  a different order across a schema change, which would otherwise read as a
+   *  configuration change on every pull after a deploy. */
+  private fingerprint(value: unknown): string {
+    const stable = (input: unknown): unknown => {
+      if (Array.isArray(input)) return input.map(stable);
+      if (input && typeof input === 'object') {
+        return Object.fromEntries(
+          Object.entries(input as Record<string, unknown>)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([k, v]) => [k, stable(v)]),
+        );
+      }
+      return input;
+    };
+    return createHash('sha256')
+      .update(JSON.stringify(stable(value)))
+      .digest('hex');
   }
 
   /** Scratch space for one live push, namespaced by batch so two pushes cannot

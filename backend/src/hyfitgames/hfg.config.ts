@@ -15,9 +15,16 @@ export const hfgConfig = {
   refreshTtlDays: parseInt(env('HFG_REFRESH_TOKEN_TTL_DAYS', '30'), 10),
 
   otpTtlMinutes: parseInt(env('HFG_OTP_TTL_MINUTES', '5'), 10),
-  otpProvider: env('HFG_OTP_PROVIDER', 'console'), // console | msg91
+  otpProvider: env('HFG_OTP_PROVIDER', 'console'), // console | msg91 | smscountry
   msg91AuthKey: env('MSG91_AUTH_KEY', ''),
   msg91TemplateId: env('MSG91_TEMPLATE_ID', ''),
+  // Sent via the host app's SmsService (smscountry gateway) — same
+  // SMSCOUNTRY_AUTH_KEY / SMSCOUNTRY_AUTH_TOKEN / SMSCOUNTRY_SENDER_ID env vars
+  // the rest of the platform uses. {otp} and {ttl} are substituted at send time.
+  otpSmsTemplate: env(
+    'HFG_OTP_SMS_TEMPLATE',
+    '{otp} is your OTP to login to HYFIT Games. Valid for {ttl} minutes. Do not share this with anyone.',
+  ),
 
   // Server-to-server key RaceResult14 sends as x-api-key on timing pushes.
   timingApiKey: env('TIMING_API_KEY', ''),

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CacheModule } from '../common/cache/cache.module';
+import { S3Module } from '../common/storage/s3.module';
 
 import { HjudgeDbService } from './hjudge-db.service';
 import { HjudgeCacheService } from './hjudge-cache.service';
@@ -11,6 +12,7 @@ import { HjudgeRaceResultService } from './services/hjudge-raceresult.service';
 import { HjudgeJudgeService } from './services/hjudge-judge.service';
 import { HjudgeParticipantSyncService } from './services/hjudge-participant-sync.service';
 import { HjudgeResultsService } from './services/hjudge-results.service';
+import { HjudgeCertificatesService } from './services/hjudge-certificates.service';
 import { HjudgeIngestService } from './services/hjudge-ingest.service';
 import { HjudgePushService } from './services/hjudge-push.service';
 import { HjudgePushScheduler } from './hjudge-push.scheduler';
@@ -36,7 +38,9 @@ import { HjudgeIngestGuard } from './hjudge-ingest.guard';
 // The module runs its own PIN-based session auth, independent of the host app's
 // JWT system.
 @Module({
-  imports: [CacheModule],
+  // S3Module for the certificate templates' artwork: a background image is the
+  // one thing this module stores that is not a row.
+  imports: [CacheModule, S3Module],
   controllers: [
     HjudgeAuthController,
     HjudgeAdminController,
@@ -65,6 +69,7 @@ import { HjudgeIngestGuard } from './hjudge-ingest.guard';
     HjudgeJudgeService,
     HjudgeParticipantSyncService,
     HjudgeResultsService,
+    HjudgeCertificatesService,
     // Both halves of offline-event sync are provided on both deployments: the
     // schemas are identical by design, and which role a server plays is
     // `HYFIT_NODE_ROLE` in its environment, checked inside these services. The

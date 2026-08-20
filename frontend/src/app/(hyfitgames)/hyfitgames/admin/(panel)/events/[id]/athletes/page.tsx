@@ -37,6 +37,9 @@ type Athlete = {
     mobile: string | null;
     club: string | null;
     category: string | null;
+    /** The age band beneath the contest, from the feed's AgeGroup column (091).
+     *  Null for a roster imported from an export that carries no such column. */
+    age_group: string | null;
     contest_id: string | null;
     wave: string | null;
     timeslot: string | null;
@@ -102,7 +105,7 @@ export default function AthletesPage() {
         const term = search.trim().toLowerCase();
         if (!term) return athletes;
         return athletes.filter((a) =>
-            [a.bib, a.name, a.club, a.category, a.mobile]
+            [a.bib, a.name, a.club, a.category, a.age_group, a.mobile]
                 .filter(Boolean)
                 .some((v) => String(v).toLowerCase().includes(term)),
         );
@@ -194,7 +197,7 @@ export default function AthletesPage() {
                 <input
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search bib, name, club, category or number"
+                    placeholder="Search bib, name, club, category, age group or number"
                     className="min-w-64 flex-1 rounded-lg border border-smoke bg-coal px-3 py-2.5 text-sm outline-none focus:border-hyred"
                 />
                 <button
@@ -280,6 +283,7 @@ export default function AthletesPage() {
                                 <th className="px-3 py-2 text-left">Bib</th>
                                 <th className="px-3 py-2 text-left">Name</th>
                                 <th className="px-3 py-2 text-left">Category</th>
+                                <th className="px-3 py-2 text-left">Age group</th>
                                 <th className="px-3 py-2 text-left">Club</th>
                                 <th className="px-3 py-2 text-left">Gender</th>
                                 <th className="px-3 py-2 text-left">Age / DOB</th>
@@ -295,6 +299,7 @@ export default function AthletesPage() {
                                     <td className="px-3 py-2 font-mono">{a.bib}</td>
                                     <td className="px-3 py-2 font-medium">{dash(a.name)}</td>
                                     <td className="px-3 py-2 text-fog">{dash(a.category)}</td>
+                                    <td className="px-3 py-2 text-fog">{dash(a.age_group)}</td>
                                     <td className="px-3 py-2 text-fog">{dash(a.club)}</td>
                                     <td className="px-3 py-2 text-fog">{dash(a.gender)}</td>
                                     <td className="px-3 py-2 text-fog">

@@ -48,7 +48,14 @@ function serviceWithCapture() {
       return { rows: [{ id: 'new-user-id' }], rowCount: 1 };
     },
   };
-  const service = new HjudgeAdminService(db as any, null as any);
+  // Four dependencies on this deployment: the roster importer, the results
+  // service and the cache are only reached by paths this spec does not walk.
+  const service = new HjudgeAdminService(
+    db as any,
+    null as any,
+    null as any,
+    null as any,
+  );
   // The write, not the audit row that follows it.
   const write = (fragment: string) =>
     calls.find((call) => call.sql.includes(fragment))!;

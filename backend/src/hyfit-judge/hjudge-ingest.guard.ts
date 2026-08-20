@@ -113,8 +113,13 @@ export class HjudgeIngestGuard implements CanActivate {
     const scopes = (row.scopes ?? []) as HjudgeIngestScope[];
     const required = this.requiredScope(request);
     if (required && !scopes.includes(required)) {
+      // The two scopes point in opposite directions, so one verb cannot
+      // describe both: a credential without `config` may not READ the setup,
+      // one without `results` may not PUBLISH the standings.
       throw new ForbiddenException(
-        `This credential may not push ${required} for "${row.event_name}"`,
+        required === 'config'
+          ? `This credential may not read the configuration for "${row.event_name}"`
+          : `This credential may not publish results for "${row.event_name}"`,
       );
     }
 
@@ -153,15 +158,19 @@ export class HjudgeIngestGuard implements CanActivate {
     return true;
   }
 
-  /** Which scope the route being called needs, from the route itself. The three
-   *  ingest paths end in the thing they write, so this is a read of the URL
-   *  rather than a second list to keep in step with the controller. */
+  /** Which scope the route being called needs, from the route itself. The
+   *  ingest paths end in the thing they carry, so this is a read of the URL
+   *  rather than a second list to keep in step with the controller.
+   *
+   *  `/handshake` returns null deliberately: it is the call that answers "what
+   *  does this credential open", and a credential must be able to say so
+   *  whichever half of the pair it holds. */
   private requiredScope(request: {
     path?: string;
     url?: string;
   }): HjudgeIngestScope | null {
     const path = String(request.path ?? request.url ?? '');
-    if (path.includes('/athletes')) return 'athletes';
+    if (path.includes('/config')) return 'config';
     if (path.includes('/results')) return 'results';
     return null;
   }

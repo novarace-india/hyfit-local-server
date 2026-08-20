@@ -25,6 +25,16 @@ import { FieldSessionProvider, useFieldSession } from "../../lib/field-session";
 const NAV = [
     { to: "/hyfitgames/admin", label: "Dashboard", icon: "◫", end: true },
     { to: "/hyfitgames/admin/events", label: "Events", icon: "▤" },
+    /* NO SETTINGS ITEM ON THIS BUILD, and it is the one deliberate gap between
+     * the two consoles.
+     *
+     * Settings configures who sends the athlete login OTP, and that screen is
+     * backed by the host app's `communication` module — channel accounts,
+     * message dispatch, the SMS providers — which is TypeORM-backed and is not
+     * mounted here. This server runs the two HYFIT modules and nothing else, on
+     * purpose. Adding the item would give a venue laptop a nav entry that leads
+     * to a 404. Athlete OTP is prod's job because athlete login is prod's job.
+     */
 ];
 
 // These are screens of ONE event, so they are not fixed destinations the way
@@ -42,6 +52,17 @@ const FIELD_NAV = [
     { segment: "operations", label: "Operations", icon: "⚙" },
     { segment: "athletes", label: "Athletes", icon: "♞" },
     { segment: "results", label: "Results", icon: "▣" },
+    /* NO CERTIFICATES ITEM ON THIS BUILD — the second and last deliberate gap
+     * between the two consoles.
+     *
+     * The template TABLE exists here (schema parity, migration 088) and the
+     * layouts prod designed arrive with every configuration pull, so anything
+     * that PRINTS a certificate at the venue has what it needs. What is missing
+     * is the screen that DESIGNS one: it is the shared Novarace certificate
+     * builder — canvas, toolbar, right panel, its own store — which lives
+     * outside the HYFIT tree and is not part of the two modules this server
+     * runs. Designing a certificate is not a venue activity; printing one is.
+     */
     // Last because it is last chronologically, and present on every event
     // rather than only offline ones: this screen is also where an event is MADE
     // offline, so hiding it until it had been used would hide the switch.

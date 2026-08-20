@@ -237,7 +237,7 @@ describe('an athlete who has already finished', () => {
       EVENT,
       'WB-5502',
     );
-    expect(result?.participant.status).toBe('Completed');
+    expect(result?.participant?.status).toBe('Completed');
     expect(result?.participant.completed).toBe(true);
   });
 
@@ -266,7 +266,7 @@ describe('who the hold belongs to', () => {
       'WB-5502',
       JUDGE,
     );
-    expect(result?.participant.status).toBe('Yours');
+    expect(result?.participant?.status).toBe('Yours');
   });
 
   it('is On course to anybody else', async () => {
@@ -276,7 +276,7 @@ describe('who the hold belongs to', () => {
       'WB-5502',
       JUDGE,
     );
-    expect(result?.participant.status).toBe('On course');
+    expect(result?.participant?.status).toBe('On course');
   });
 
   it('is Ready when nobody holds it', async () => {
@@ -286,7 +286,7 @@ describe('who the hold belongs to', () => {
       'WB-5502',
       JUDGE,
     );
-    expect(result?.participant.status).toBe('Ready');
+    expect(result?.participant?.status).toBe('Ready');
   });
 
   it('matches the holder case-insensitively', async () => {
@@ -296,7 +296,7 @@ describe('who the hold belongs to', () => {
       'WB-5502',
       'JDG-01',
     );
-    expect(result?.participant.status).toBe('Yours');
+    expect(result?.participant?.status).toBe('Yours');
   });
 
   it('reports a claim back as the claiming judge’s own', async () => {
@@ -308,7 +308,7 @@ describe('who the hold belongs to', () => {
       { code: 'WB-5502' },
       JUDGE,
     );
-    expect(result?.participant.status).toBe('Yours');
+    expect(result?.participant?.status).toBe('Yours');
   });
 
   it('still labels a finished athlete Completed, held or not', async () => {
@@ -318,7 +318,7 @@ describe('who the hold belongs to', () => {
       'WB-5502',
       JUDGE,
     );
-    expect(result?.participant.status).toBe('Completed');
+    expect(result?.participant?.status).toBe('Completed');
   });
 });
 
@@ -367,7 +367,7 @@ describe('claimPair', () => {
       JUDGE,
     );
 
-    expect(result.participant.bib).toBe('201');
+    expect(result.participant?.bib).toBe('201');
     expect(result.partner?.bib).toBe('202');
     expect(state[0].jugedby).toBe(JUDGE);
     expect(state[1].jugedby).toBe(JUDGE);

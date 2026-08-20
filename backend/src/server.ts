@@ -5,6 +5,11 @@ import { ValidationPipe, ClassSerializerInterceptor } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import compression from 'compression';
+import express from 'express';
+import {
+  HYFIT_LOCAL_UPLOAD_ROUTE,
+  hyfitLocalUploadRoot,
+} from './common/storage/s3.service';
 import { TimingInterceptor } from './common/interceptors/timing.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -41,6 +46,30 @@ export async function bootstrap() {
           imgSrc: ["'self'", 'data:', 'https:'],
         },
       },
+    }),
+  );
+
+  /* Uploaded files, served back off this laptop's own disk.
+   *
+   * The prod deployment has an S3 bucket behind a CDN and this one has a
+   * folder; `S3Service` in this build writes to that folder and returns a URL
+   * under this route, so the two halves have to agree on the path — which is
+   * why it is a constant shared with the service rather than a string written
+   * twice.
+   *
+   * OUTSIDE THE `api` PREFIX ON PURPOSE. These are assets, not endpoints: a
+   * certificate background is fetched by an <img> tag, and putting it behind
+   * the API prefix would file it with the routes that carry an envelope and a
+   * guard. `fallthrough: false` so a missing file is a 404 from here rather
+   * than falling through to the Nest router and coming back as a confusing
+   * "Cannot GET".
+   */
+  app.use(
+    HYFIT_LOCAL_UPLOAD_ROUTE,
+    express.static(hyfitLocalUploadRoot, {
+      fallthrough: false,
+      index: false,
+      maxAge: '1h',
     }),
   );
 

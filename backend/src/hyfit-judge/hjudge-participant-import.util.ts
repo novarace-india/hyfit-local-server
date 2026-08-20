@@ -8,6 +8,10 @@ export type ParticipantFieldConfig = {
   bibField: string;
   nameField: string;
   categoryField: string;
+  // The age band beneath the contest — RaceResult's `AgeGroup`. Optional the way
+  // timeslot is: most start lists have no such column, and its absence must
+  // leave whatever the standings later name alone rather than blanking it.
+  ageGroupField: string;
   contestIdField: string;
   waveField: string;
   // When the wave is on the floor. Optional in a way `wave` is not: plenty of
@@ -34,6 +38,7 @@ export type ImportedParticipant = {
   bib: string;
   name: string;
   category: string;
+  ageGroup: string;
   contestId: string;
   wave: string;
   timeslot: string;
@@ -131,6 +136,7 @@ export function normalizeParticipants(
       bib,
       name,
       category: sourceString(record, config.categoryField) || 'Unassigned',
+      ageGroup: sourceString(record, config.ageGroupField),
       contestId: sourceString(record, config.contestIdField),
       wave: sourceString(record, config.waveField) || 'Wave pending',
       timeslot: sourceString(record, config.timeslotField),
@@ -190,6 +196,11 @@ export function participantFieldConfig(
       ['categoryField', 'category'],
       'category',
     ),
+    // No default column name, unlike category: a start list that carries no age
+    // band must read as "no band", and a default of 'agegroup' would be a name
+    // this payload does not have, quietly resolved by the detection below
+    // anyway when it does.
+    ageGroupField: mappingValue(mapping, ['ageGroupField', 'ageGroup'], ''),
     contestIdField: mappingValue(
       mapping,
       ['contestIdField', 'contestId'],
@@ -223,7 +234,11 @@ export function participantFieldConfig(
   };
 }
 
-function setValueAtPath(payload: unknown, path: string, value: unknown): unknown {
+function setValueAtPath(
+  payload: unknown,
+  path: string,
+  value: unknown,
+): unknown {
   if (!path) return value;
   const root =
     payload && typeof payload === 'object' && !Array.isArray(payload)
@@ -280,11 +295,55 @@ export function parseParticipantImport(
     'bibnumber',
     'startnumber',
   ]);
-  config.categoryField = matchingKey(config.categoryField, [
-    'category',
-    'contest',
-    'race',
+
+  /* THE CONTEST, and it has to be the SAME column the results importer calls
+   * the contest.
+   *
+   * The 2026 export carries `Contest` ("NextGen Boys") next to `Category`
+   * ("Next Gen Boys 12-15"). An athlete is keyed on (event, phone, name,
+   * contest), so if the start list keyed people on the age band while the
+   * standings keyed them on the race, every finisher would fail to match their
+   * own roster row and the results import would create a second athlete for
+   * them. `Contest` wins in both places — see ALIASES in
+   * hjudge-results-import.util.ts.
+   *
+   * An operator who has configured a category column in Operations still wins:
+   * only the DEFAULT is being chosen here, which is why the configured name is
+   * read from the mapping rather than from `config` (where it has already been
+   * defaulted to 'category' and can no longer be told apart from a choice).
+   */
+  const configuredCategory = String(
+    mapping.categoryField ?? mapping.category ?? '',
+  ).trim();
+  config.categoryField =
+    configuredCategory && valueAtPath(sample, configuredCategory) !== undefined
+      ? configuredCategory
+      : (['contest', 'category', 'race', 'class', 'division']
+          .map((alias) =>
+            keys.find(
+              (key) => key.toLowerCase().replace(/[^a-z0-9]/g, '') === alias,
+            ),
+          )
+          .find(Boolean) ?? config.categoryField);
+  /* The age band, and never the column the CONTEST just took.
+   *
+   * The 2026 export carries `Contest` ("NextGen Boys"), `Category` ("Next Gen
+   * Boys 12-15") and now `AgeGroup`. `category` is deliberately absent from the
+   * aliases here: on an older export that column IS the contest, and reading it
+   * as a band as well would put every athlete in a band named after their own
+   * race. The explicit guard below covers the newer export too, where the
+   * contest resolved to `Category` because the file has no `Contest` column.
+   *
+   * A name the operator configured in Operations wins over all of it — the
+   * `matchingKey` fallback is the configured value. */
+  config.ageGroupField = matchingKey(config.ageGroupField, [
+    'agegroup',
+    'agecategory',
+    'ageclass',
+    'agedivision',
   ]);
+  if (config.ageGroupField === config.categoryField) config.ageGroupField = '';
+
   config.contestIdField = matchingKey(config.contestIdField, [
     'contestid',
     'contest_id',
@@ -366,7 +425,9 @@ export function parseParticipantImport(
   });
   config.nameField = '__hyfitFullName';
   return normalizeParticipants(
-    config.listPath ? setValueAtPath(payload, config.listPath, adapted) : adapted,
+    config.listPath
+      ? setValueAtPath(payload, config.listPath, adapted)
+      : adapted,
     config,
   );
 }
@@ -374,6 +435,7 @@ export function parseParticipantImport(
 export type ExistingParticipant = {
   name: string;
   category: string;
+  ageGroup: string;
   contestId: string;
   wave: string;
   timeslot: string;

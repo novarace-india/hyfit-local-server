@@ -1,243 +1,138 @@
 import {
   chunkByBytes,
-  decodeSyncCredential,
-  defaultIngestEndpoint,
-  encodeSyncCredential,
+  encodeSyncPair,
   encodeSyncUrl,
   normaliseBaseUrl,
-  parseIngestEndpoint,
+  parseSyncEndpoint,
   rehostEndpoint,
-  HJUDGE_CREDENTIAL_PREFIX,
+  stripToken,
 } from './hjudge-sync-credential.util';
 
 /* The two pure pieces of offline-event sync, which are also the two most
- * breakable: a codec whose failures land on somebody at a venue with a paste
- * buffer, and a chunker whose failures land as a 413 on every push. Everything
- * else in that feature needs two databases and a network to exercise. */
+ * breakable: a URL parser whose failures land on somebody at a venue with a
+ * paste buffer, and a chunker whose failures land as a 413 on every push.
+ * Everything else in that feature needs two databases and a network. */
 
-const credential = {
-  baseUrl: 'https://app.example.com',
-  eventId: '11111111-2222-3333-4444-555555555555',
-  eventName: 'HYFIT Bengaluru',
-  token: 'hyfitsync_' + 'a'.repeat(64),
-  expiresAt: '2026-09-01T00:00:00.000Z',
-};
+const BASE = 'https://app.example.com';
+const EVENT = '11111111-2222-3333-4444-555555555555';
+const TOKEN = 'hyfitsync_' + 'a'.repeat(64);
 
-describe('sync connection codes', () => {
-  it('round-trips', () => {
-    expect(decodeSyncCredential(encodeSyncCredential(credential))).toEqual(
-      credential,
+describe('sync endpoint URLs', () => {
+  it('publishes the two endpoints prod hands out', () => {
+    const { pullUrl, pushUrl } = encodeSyncPair(BASE, EVENT, TOKEN);
+    expect(pullUrl).toBe(
+      `${BASE}/api/hyfit-judge/ingest/events/${EVENT}/config?k=${TOKEN}`,
     );
+    expect(pushUrl).toBe(
+      `${BASE}/api/hyfit-judge/ingest/events/${EVENT}/results?k=${TOKEN}`,
+    );
+  });
+
+  it('reads back what it wrote', () => {
+    const parsed = parseSyncEndpoint(encodeSyncUrl(BASE, EVENT, TOKEN, 'config'));
+    expect(parsed.baseUrl).toBe(BASE);
+    expect(parsed.eventId).toBe(EVENT);
+    expect(parsed.token).toBe(TOKEN);
+    expect(parsed.route).toBe('config');
+  });
+
+  /* THE POINT OF THE WHOLE PARSER. An operator pastes whichever of the two they
+   * happened to copy, and both must produce the same pairing — otherwise which
+   * one they grabbed decides whether the laptop can pull, push, or half of
+   * each. */
+  it('derives the same pair from either endpoint', () => {
+    const { pullUrl, pushUrl } = encodeSyncPair(BASE, EVENT, TOKEN);
+    const fromPull = parseSyncEndpoint(pullUrl);
+    const fromPush = parseSyncEndpoint(pushUrl);
+
+    expect(fromPull.pullUrl).toBe(fromPush.pullUrl);
+    expect(fromPull.pushUrl).toBe(fromPush.pushUrl);
+    expect(fromPull.route).toBe('config');
+    expect(fromPush.route).toBe('results');
+  });
+
+  /* The stored form carries no credential: the token lives in its own column
+   * and travels as a Bearer header. A second copy inside a string the console
+   * renders would undo that. */
+  it('strips the credential out of what it stores', () => {
+    const parsed = parseSyncEndpoint(encodeSyncUrl(BASE, EVENT, TOKEN, 'results'));
+    expect(parsed.pullUrl).not.toContain('k=');
+    expect(parsed.pushUrl).not.toContain('k=');
+    expect(parsed.pullUrl).toBe(
+      `${BASE}/api/hyfit-judge/ingest/events/${EVENT}/config`,
+    );
+    // …and the token is still returned, separately, for the column that holds it.
+    expect(parsed.token).toBe(TOKEN);
   });
 
   // Copying out of a chat window is how these actually travel, and that is
   // where the line breaks come from.
   it('survives whitespace and line breaks introduced by copying', () => {
-    const code = encodeSyncCredential(credential);
-    const mangled = `${code.slice(0, 20)}\n  ${code.slice(20, 60)}\t${code.slice(60)}  `;
-    expect(decodeSyncCredential(mangled)).toEqual(credential);
+    const url = encodeSyncUrl(BASE, EVENT, TOKEN, 'config');
+    const mangled = `${url.slice(0, 20)}\n  ${url.slice(20, 60)}\t${url.slice(60)}  `;
+    expect(parseSyncEndpoint(mangled).token).toBe(TOKEN);
   });
 
-  // Somebody will paste the object rather than the code. Refusing something
-  // this unambiguous would be a refusal for its own sake.
-  it('accepts the bare JSON as well as the code', () => {
-    expect(decodeSyncCredential(JSON.stringify(credential))).toEqual(credential);
+  it('keeps a non-default port', () => {
+    const parsed = parseSyncEndpoint(
+      encodeSyncUrl('http://192.168.1.20:3001', EVENT, TOKEN, 'config'),
+    );
+    expect(parsed.baseUrl).toBe('http://192.168.1.20:3001');
+  });
+
+  it('survives a token with characters that need escaping', () => {
+    const odd = 'hyfitsync_a+b/c=d e';
+    expect(parseSyncEndpoint(encodeSyncUrl(BASE, EVENT, odd, 'config')).token).toBe(
+      odd,
+    );
   });
 
   it('names what is missing rather than failing generically', () => {
-    expect(() => decodeSyncCredential('')).toThrow(/paste the connection code/i);
-    expect(() => decodeSyncCredential('some-random-string')).toThrow(
-      new RegExp(HJUDGE_CREDENTIAL_PREFIX),
+    expect(() => parseSyncEndpoint('')).toThrow(/paste the sync url/i);
+    // The half-copied paste: everything up to the query string. It looks
+    // complete, and it is useless, so it has to say which half is missing.
+    const truncated = encodeSyncUrl(BASE, EVENT, TOKEN, 'config').split('?')[0];
+    expect(() => parseSyncEndpoint(truncated)).toThrow(/\?k=/);
+    expect(() => parseSyncEndpoint(`${BASE}/api/hyfit-judge/ingest?k=${TOKEN}`)).toThrow(
+      /names no event/i,
     );
-    expect(() =>
-      decodeSyncCredential(JSON.stringify({ ...credential, token: '' })),
-    ).toThrow(/no credential/i);
-    expect(() =>
-      decodeSyncCredential(JSON.stringify({ ...credential, eventId: '' })),
-    ).toThrow(/names no event/i);
-    expect(() =>
-      decodeSyncCredential(JSON.stringify({ ...credential, baseUrl: '' })),
-    ).toThrow(/no server address/i);
   });
 
-  // The endpoint form: what prod's console leads with, and what an operator is
-  // most likely to actually paste.
-  describe('the endpoint URL form', () => {
-    it('round-trips the parts that matter', () => {
-      const back = decodeSyncCredential(encodeSyncUrl(credential));
-      expect(back.baseUrl).toBe(credential.baseUrl);
-      expect(back.eventId).toBe(credential.eventId);
-      expect(back.token).toBe(credential.token);
-      // Neither is carried by a URL; `bind` takes both from the handshake,
-      // which is the authority on them in any case.
-      expect(back.eventName).toBe('');
-      expect(back.expiresAt).toBe('');
-    });
+  /* The retired code form. Somebody will have a HYFITSYNC1 blob in a chat
+   * window from before 093, and "not a URL" is a worse answer than saying the
+   * form is gone and what to do instead. */
+  it('tells the holder of an old HYFITSYNC1 code what to do', () => {
+    expect(() => parseSyncEndpoint('HYFITSYNC1.eyJhIjoxfQ')).toThrow(
+      /HYFITSYNC1/,
+    );
+  });
 
-    // Prod hands out two: one per destination. Either must bind the same
-    // target, because they are two routes on one credential — not two keys.
-    it('accepts either of the two endpoints prod publishes', () => {
-      const athletes = encodeSyncUrl(credential, 'athletes');
-      const results = encodeSyncUrl(credential, 'results');
-
-      expect(athletes).toContain('/athletes?k=');
-      expect(results).toContain('/results?k=');
-
-      const a = decodeSyncCredential(athletes);
-      const r = decodeSyncCredential(results);
-      expect(a).toEqual(r);
-      expect(a.eventId).toBe(credential.eventId);
-      expect(a.token).toBe(credential.token);
-      expect(a.baseUrl).toBe(credential.baseUrl);
-    });
-
-    it('reads the bare event endpoint too', () => {
-      const bare = encodeSyncUrl(credential);
-      expect(bare).not.toContain('/athletes');
-      expect(decodeSyncCredential(bare).eventId).toBe(credential.eventId);
-    });
-
-    it('keeps a non-default port', () => {
-      const local = { ...credential, baseUrl: 'http://192.168.1.20:3001' };
-      expect(decodeSyncCredential(encodeSyncUrl(local)).baseUrl).toBe(
-        'http://192.168.1.20:3001',
+  /* "Change server address": prod moves, the path below the origin does not. */
+  describe('rehosting', () => {
+    it('swaps the origin and keeps the path', () => {
+      const { pullUrl } = encodeSyncPair(BASE, EVENT, TOKEN);
+      expect(rehostEndpoint(stripToken(pullUrl), 'https://staging.example.com')).toBe(
+        `https://staging.example.com/api/hyfit-judge/ingest/events/${EVENT}/config`,
       );
     });
 
-    // The half-copied paste: everything up to the query string. It looks
-    // complete, and it is useless, so it has to say which half is missing.
-    it('names the missing credential when the ?k= was left behind', () => {
-      const truncated = encodeSyncUrl(credential).split('?')[0];
-      expect(() => decodeSyncCredential(truncated)).toThrow(/\?k=/);
+    it('leaves the endpoint alone when the new address is unusable', () => {
+      const url = `${BASE}/api/hyfit-judge/ingest/events/${EVENT}/config`;
+      expect(rehostEndpoint(url, 'not a url at all')).toBe(url);
     });
-
-    it('survives a token with characters that need escaping', () => {
-      const odd = { ...credential, token: 'hyfitsync_a+b/c=d e' };
-      expect(decodeSyncCredential(encodeSyncUrl(odd)).token).toBe(odd.token);
-    });
-  });
-
-  it('rejects a truncated code as damaged', () => {
-    const code = encodeSyncCredential(credential);
-    expect(() => decodeSyncCredential(code.slice(0, code.length - 20))).toThrow(
-      /damaged/i,
-    );
   });
 
   // A base URL carrying a path would produce /api/api/... and a 404 nobody
   // would read as a typo.
   it('reduces a base URL to its origin', () => {
-    expect(normaliseBaseUrl('https://app.example.com/')).toBe(
-      'https://app.example.com',
-    );
-    expect(normaliseBaseUrl('https://app.example.com/api/hyfit-judge')).toBe(
-      'https://app.example.com',
-    );
-    expect(normaliseBaseUrl('app.example.com')).toBe('https://app.example.com');
+    expect(normaliseBaseUrl('https://app.example.com/')).toBe(BASE);
+    expect(normaliseBaseUrl('https://app.example.com/api/hyfit-judge')).toBe(BASE);
+    expect(normaliseBaseUrl('app.example.com')).toBe(BASE);
     expect(normaliseBaseUrl('http://192.168.1.20:3001')).toBe(
       'http://192.168.1.20:3001',
     );
     expect(normaliseBaseUrl('  ')).toBe('');
     expect(normaliseBaseUrl('not a url at all')).toBe('');
-  });
-});
-
-/* The two endpoints, kept whole.
- *
- * This is the half `decodeSyncCredential` deliberately throws away, and the
- * throwing-away is what made a pasted results endpoint look accepted and do
- * nothing: the path was discarded and the sender rebuilt one it had invented.
- * So what these assert is mostly "the URL that comes out is the URL that went
- * in, minus the secret". */
-describe('ingest endpoints', () => {
-  const athletes = encodeSyncUrl(credential, 'athletes');
-  const results = encodeSyncUrl(credential, 'results');
-
-  it('keeps the pasted path and strips only the credential', () => {
-    const parsed = parseIngestEndpoint(athletes, 'athletes');
-    expect(parsed.url).toBe(athletes.split('?')[0]);
-    expect(parsed.url).not.toContain('k=');
-    expect(parsed.token).toBe(credential.token);
-    expect(parsed.eventId).toBe(credential.eventId);
-    expect(parsed.baseUrl).toBe(credential.baseUrl);
-  });
-
-  // The point of the change: prod publishing this route from somewhere the
-  // sender would never have guessed is not an error, and the pasted address is
-  // what gets stored.
-  it('keeps a path this codebase would never have built', () => {
-    const odd =
-      'https://ingest.example.com/hyfit/v9/events/' +
-      credential.eventId +
-      '/standings?k=' +
-      credential.token;
-    const parsed = parseIngestEndpoint(odd, 'results');
-    expect(parsed.url).toBe(odd.split('?')[0]);
-    expect(parsed.baseUrl).toBe('https://ingest.example.com');
-  });
-
-  it('keeps other query parameters, and does not leave a bare ?', () => {
-    const withExtras = `${athletes}&tenant=bengaluru`;
-    const parsed = parseIngestEndpoint(withExtras, 'athletes');
-    expect(parsed.url).toContain('tenant=bengaluru');
-    expect(parsed.url).not.toContain('k=');
-    expect(parseIngestEndpoint(athletes, 'athletes').url).not.toMatch(/\?$/);
-  });
-
-  // The silent mix-up: the same URL in both boxes sends the roster to the
-  // results route, which prod accepts as an empty standings push.
-  it('catches the two endpoints being pasted the wrong way round', () => {
-    expect(() => parseIngestEndpoint(results, 'athletes')).toThrow(/results/i);
-    expect(() => parseIngestEndpoint(athletes, 'results')).toThrow(
-      /participants/i,
-    );
-  });
-
-  it('names what is missing, per box', () => {
-    expect(() => parseIngestEndpoint('', 'results')).toThrow(/results endpoint/i);
-    expect(() => parseIngestEndpoint('', 'athletes')).toThrow(
-      /participants endpoint/i,
-    );
-    expect(() => parseIngestEndpoint(athletes.split('?')[0], 'athletes')).toThrow(
-      /\?k=/,
-    );
-    expect(() => parseIngestEndpoint('HYFITSYNC1.abc', 'athletes')).toThrow(
-      /https:\/\//,
-    );
-    expect(() =>
-      parseIngestEndpoint(`https://app.example.com/nothing?k=x`, 'athletes'),
-    ).toThrow(/names no event/i);
-  });
-
-  it('survives a token with characters that need escaping', () => {
-    const odd = { ...credential, token: 'hyfitsync_a+b/c=d e' };
-    expect(parseIngestEndpoint(encodeSyncUrl(odd, 'results'), 'results').token).toBe(
-      odd.token,
-    );
-  });
-
-  // What a binding made from the short code — or one made before the endpoints
-  // were stored at all — falls back to. It must be exactly what the sender used
-  // to build, or those bindings change behaviour on upgrade.
-  it('builds the same endpoint the URL form encodes', () => {
-    expect(
-      defaultIngestEndpoint(credential.baseUrl, credential.eventId, 'results'),
-    ).toBe(results.split('?')[0]);
-  });
-
-  // "Change server address" has to move the endpoints with it, or it is a
-  // no-op on the only field it exists to fix.
-  it('moves an endpoint onto another origin, path intact', () => {
-    const moved = rehostEndpoint(
-      'https://app.example.com/hyfit/v9/events/abc/standings',
-      'http://192.168.1.20:3001',
-    );
-    expect(moved).toBe('http://192.168.1.20:3001/hyfit/v9/events/abc/standings');
-  });
-
-  it('leaves an endpoint alone when the new address is unusable', () => {
-    const url = 'https://app.example.com/x';
-    expect(rehostEndpoint(url, 'not a url at all')).toBe(url);
   });
 });
 

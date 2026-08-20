@@ -23,12 +23,17 @@ const FIELD_B = '22222222-2222-2222-2222-222222222222';
 const PLATFORM_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
 const user = (over: Partial<HjudgeUser>): HjudgeUser => ({
+  // Stated rather than left to the spread: `platformEventId` is non-optional on
+  // HjudgeUser, and a Partial<> override widens it to `| undefined` — so the
+  // default has to be here, below the spread's reach, not implied by it.
+  platformEventId: null,
   id: 'u1',
   staffId: 'S1',
   name: 'Test',
   role: 'event_admin',
   eventId: FIELD_A,
   boundEventId: null,
+  checkinStage: null,
   sessionId: 's1',
   deviceLabel: '',
   ipAddress: '',
@@ -45,6 +50,7 @@ const adminService = {
 // to widen a session's event — so the test reaches it the same way the routes do.
 const controller = new HjudgeAdminController(
   adminService as any,
+  null as any,
   null as any,
   null as any,
   null as any,
@@ -124,6 +130,7 @@ describe('HYFIT admin event scoping', () => {
           return Promise.resolve({ users: [] });
         },
       } as any,
+      null as any,
       null as any,
       null as any,
       null as any,
