@@ -217,6 +217,45 @@ export class HjudgeCheckinService {
   }
 
   /**
+   * The medal desk's whole read: who is holding this code, and what they are
+   * collecting.
+   *
+   * The same two-hop resolution `getParticipant` does for a code — the mapping
+   * table turns a wristband or a transponder into a BIB, the participant feed
+   * turns that BIB into an athlete — and then almost all of it is thrown away.
+   *
+   * What comes back is only what the board draws. No date of birth, no mobile
+   * number, no window, no assignment table, no teammates: this is the one
+   * check-in read that is not behind a counter session (see
+   * `HjudgePublicController`), and a route that is public has to return a
+   * payload that is safe to be public rather than one that is filtered on the
+   * way to a screen. It is also why nothing here is a lookup by BIB — a race
+   * number is on the athlete's own chest and can be read across a barrier,
+   * where a band is something they are holding.
+   */
+  async getMedal(eventId: string, code: string) {
+    const config = await this.rr.loadConfig(eventId);
+    this.rr.requireFeed(config);
+
+    const entry = await this.rr.fetchAthleteByAssetCode(config, eventId, code);
+    if (!entry) return null;
+
+    const person = entry.person;
+    return {
+      name: person.name,
+      contest: person.category,
+      club: person.club,
+      // Both codes, because the board says which of the two was scanned and
+      // cannot work that out from one. They are equipment the athlete is
+      // holding, not an identity.
+      wristbandCode: person.wristbandCode,
+      transponderCode: person.transponderCode,
+      totalTime: person.totalTime,
+      medalColour: person.medalColour,
+    };
+  }
+
+  /**
    * Who this volunteer is, and everything that decides whether their counter
    * can work at all.
    *

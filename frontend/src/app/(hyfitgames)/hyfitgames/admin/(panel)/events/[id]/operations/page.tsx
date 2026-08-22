@@ -65,7 +65,8 @@ const defaultConfig: Config = {
     // pre-filled with guesses would override the aliases with names this
     // event's export may not have.
     resultsMapping: "{}",
-    // Every field the check-in and judge apps write back, spelled with the
+    // Every field the check-in and judge apps write back — plus the two the
+    // medal desk only reads, `medalcolour` and `totaltime` — spelled with the
     // names RaceResult uses by default. An organiser whose event names them
     // differently edits the value, never the key.
     // Kept in the same order as `updateFieldDefaults` in
@@ -141,6 +142,8 @@ const defaultConfig: Config = {
             finishtod: "finishtod",
             status: "Status",
             statusofathelet: "statusofathelet",
+            medalcolour: "MedalColour",
+            totaltime: "TotalTime",
         },
         null,
         2,

@@ -116,6 +116,14 @@ export const updateFieldDefaults = {
   // so writing a status code into it inverts the roster — see `RACE_HANDED_IN`
   // in `services/hjudge-race-submit.service.ts`.
   statusofathelet: 'statusofathelet',
+  // Read-only, and the only two keys here that are. Nothing in either app
+  // writes a medal or a finish time — RaceResult decides both — but the medal
+  // desk has to read them off the participant feed, and this is the mapping an
+  // event already uses to say what its columns are called. A second mapping
+  // for two fields nobody writes would be a second place to get the spelling
+  // wrong.
+  medalcolour: 'MedalColour',
+  totaltime: 'TotalTime',
 } as const;
 
 export type UpdateFieldKey = keyof typeof updateFieldDefaults;

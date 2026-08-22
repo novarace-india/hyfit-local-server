@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   NotFoundException,
@@ -7,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { HjudgeResultsService } from '../services/hjudge-results.service';
 import { HjudgeCertificatesService } from '../services/hjudge-certificates.service';
+import { HjudgeCheckinService } from '../services/hjudge-checkin.service';
 import { HjudgeDbService } from '../hjudge-db.service';
 
 /**
@@ -34,6 +36,7 @@ export class HjudgePublicController {
   constructor(
     private readonly results: HjudgeResultsService,
     private readonly certificates: HjudgeCertificatesService,
+    private readonly checkin: HjudgeCheckinService,
     private readonly db: HjudgeDbService,
   ) {}
 
@@ -123,6 +126,51 @@ export class HjudgePublicController {
    * outcome: an organiser who has not finished a certificate has not published
    * one.
    */
+  /**
+   * Which medal the athlete holding `?code=` is collecting.
+   *
+   * For the medal desk at the end of the floor, which is not a counter: it
+   * reads a band and reads a column back, writes nothing, and is answerable
+   * for nothing — so the tablet running it never signs in, and this is the
+   * route that lets it not have to. Everything behind
+   * `/hyfit-judge/checkin` wants a counter session, and a volunteer signing
+   * into a counter they are not standing at just to read a colour out loud is
+   * a worse answer than a public read.
+   *
+   * Public in the full sense this controller means it (see the header): the
+   * service returns the athlete's name, contest, club, finish time, medal and
+   * the two equipment codes, and nothing else. No date of birth and no mobile
+   * number — those are on the same record and must not follow it out here.
+   * The fields that do leave are the ones a published results board carries
+   * already.
+   *
+   * A code rather than a BIB, deliberately. A race number is on the athlete's
+   * chest and can be read from across a barrier; a band is something they are
+   * holding, which makes the lookup one only the person at the desk with them
+   * can make.
+   */
+  @Get('events/:eventId/medal')
+  async medal(
+    @Param('eventId') eventId: string,
+    @Query('code') code?: string,
+  ) {
+    const clean = (code ?? '').trim();
+    if (!clean)
+      throw new BadRequestException(
+        'A wristband or transponder code is required',
+      );
+
+    const athlete = await this.checkin.getMedal(eventId, clean);
+    // Not an error, and worded so the desk can act on it: the usual cause is a
+    // band that has not been handed over yet.
+    if (!athlete)
+      throw new NotFoundException(
+        `${clean} is not issued to anyone — the mapping table has it as neither a wristband nor a transponder`,
+      );
+
+    return { athlete };
+  }
+
   @Get('events/:eventId/certificate-template')
   async certificateTemplate(
     @Param('eventId') eventId: string,

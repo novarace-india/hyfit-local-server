@@ -108,6 +108,32 @@ describe('buildCheckinRoster', () => {
     expect(entry.person.transponderCode).toBe('7001651');
   });
 
+  it('carries the medal and the finish time off the record', () => {
+    const roster = build([
+      feedRow({ MedalColour: 'Gold Medal', TotalTime: '01:12:44' }),
+    ]);
+    const entry = roster.byBib.get('11651')!;
+    expect(entry.person.medalColour).toBe('Gold Medal');
+    expect(entry.person.totalTime).toBe('01:12:44');
+  });
+
+  it('reads an unawarded athlete as blank rather than missing', () => {
+    // Most of the field, most of the day. The medal desk shows "not yet"; it
+    // must not be handed something that looks like a lookup failure.
+    const entry = build([feedRow()]).byBib.get('11651')!;
+    expect(entry.person.medalColour).toBe('');
+    expect(entry.person.totalTime).toBe('');
+  });
+
+  it('finds the finish time however the Custom API spaced it', () => {
+    // RaceResult's designer exports the same field as `TotalTime` or
+    // `Total Time` depending on how the Custom API was built.
+    const entry = build([feedRow({ 'Total Time': '00:58:03' })]).byBib.get(
+      '11651',
+    )!;
+    expect(entry.person.totalTime).toBe('00:58:03');
+  });
+
   // The feed returns these as JSON booleans. Read as text, `false` becomes the
   // truthy string "false" and every athlete on the start list looks checked in.
   describe('boolean status fields', () => {
@@ -208,6 +234,8 @@ describe('checkinFieldNames', () => {
     expect(checkinFieldNames({})).toEqual({
       judgedBy: 'jugedby',
       statusOfAthlete: 'statusofathelet',
+      medalColour: 'MedalColour',
+      totalTime: 'TotalTime',
       stage1Status: 'stage1checkin',
       stage1Time: 'stage1checkintime',
       wristband: 'wristbandID',

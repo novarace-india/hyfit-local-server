@@ -56,6 +56,12 @@ export interface CheckinFieldNames {
   judgedBy: string;
   /** The athlete's completion flag, READ from the participant feed. */
   statusOfAthlete: string;
+  /** The medal this athlete is collecting, READ from the participant feed.
+   *  Awarded on RaceResult's side; nothing here ever writes it. */
+  medalColour: string;
+  /** The finish time as RaceResult formatted it, READ from the feed. Blank for
+   *  everyone who has not finished, which is most of the field most of the day. */
+  totalTime: string;
   stage1Status: string;
   stage1Time: string;
   wristband: string;
@@ -70,6 +76,8 @@ export function checkinFieldNames(mapping: unknown): CheckinFieldNames {
   return {
     judgedBy: resolveUpdateField(mapping, 'judgedby'),
     statusOfAthlete: resolveUpdateField(mapping, 'statusofathelet'),
+    medalColour: resolveUpdateField(mapping, 'medalcolour'),
+    totalTime: resolveUpdateField(mapping, 'totaltime'),
     stage1Status: resolveUpdateField(mapping, 'stage1checkin'),
     stage1Time: resolveUpdateField(mapping, 'stage1checkintime'),
     wristband: resolveUpdateField(mapping, 'wristband'),
@@ -235,6 +243,19 @@ export type CheckinPerson = ImportedParticipant & {
    * record says the athlete is done.
    */
   completed: boolean;
+  /**
+   * What medal this athlete is collecting, verbatim from the feed — `Gold
+   * Medal`, `Silver`, or blank.
+   *
+   * Blank is an ordinary answer, not a missing one: an athlete who has not been
+   * awarded yet has the column empty, and a client that reads that as an error
+   * would send them away from the desk. Passed through unparsed so the screen
+   * shows the organiser's own wording rather than a re-spelling of it.
+   */
+  medalColour: string;
+  /** The finish time as RaceResult formatted it, or blank for an athlete still
+   *  on course. Shown, never computed from. */
+  totalTime: string;
 };
 
 export interface CheckinRosterEntry {
@@ -345,6 +366,8 @@ export function buildCheckinRoster(
           transponderCode: readRecordField(record, fields.transponder),
           judgedBy: readRecordField(record, fields.judgedBy),
           completed: readRecordFlag(record, fields.statusOfAthlete),
+          medalColour: readRecordField(record, fields.medalColour),
+          totalTime: readRecordField(record, fields.totalTime),
         },
         stages,
       };
