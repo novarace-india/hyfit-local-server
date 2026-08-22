@@ -19,7 +19,11 @@ const nextConfig: NextConfig = {
     // The app is built against trailing-slash URLs throughout — leaving this off
     // makes every internal link redirect once, and breaks the /api rewrite match.
     trailingSlash: true,
-    allowedDevOrigins: ["localhost", "127.0.0.1"],
+    // The judge and check-in apps run on tablets over the venue LAN, so the
+    // dev server is reached by IP, not localhost. Any origin missing here has
+    // its HMR websocket rejected with a 403 — the page still loads and works,
+    // and then reloads itself every ~40s once the dev client gives up retrying.
+    allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.0.*"],
     turbopack: { root: path.join(__dirname) },
     experimental: {
         // How long the rewrite proxy below waits for the backend before it
